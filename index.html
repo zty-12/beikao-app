@@ -151,7 +151,7 @@ function allQ(){ return BANK.questions.map(q=>Q(q.id)).filter(Boolean); }
 const ST = {progress:{}, srs:{}, settings:{examDate:"",dailyNew:20,dailyBrush:50,theme:"light",
   supabaseUrl:"",supabaseKey:""}, plan:{}, exams:[], overrides:{}, daily:{},
   lib:{read:{},time:{},excerpts:[]}};
-const SKEYS=["progress","srs","settings","plan","exams","overrides","daily","lib"];
+const SKEYS=["progress","srs","settings","plan","exams","overrides","daily","lib","videos","aiPlan"];
 let _mem={};
 const Store={
   async init(){
@@ -467,7 +467,7 @@ Exam.updateSummary=function(){
   if(chs.length) parts.push(`章节 <b>${chs.length}</b> 节`);
   if(books.length) parts.push(`范围内可用 <b>${pool}</b> 题`);
   let warn="";
-  if(books.length&&totalQ>pool) warn=` <span style="color:#c0392b">⚠ 抽题数超过可用题数, 请调小数量或扩大覆盖范围</span>`;
+  if(books.length&&totalQ>pool) warn=` <a style="color:#c0392b;cursor:pointer;text-decoration:underline" onclick="Exam.fitToPool(${pool})">⚠ 超出可用题数, 点击自动调整为 ${pool} 题</a>`;
   sum.innerHTML=parts.join(" · ")+warn;
   const lbl=$("#ch-scope-label"); if(lbl) lbl.textContent=chs.length?("已选 "+chs.length+" 节"):"全部章节";
   const ta=$("#rule-json"); if(ta) ta.value=JSON.stringify(this.buildCustomRule(),null,1);
@@ -490,6 +490,17 @@ Exam.beginCustom=function(){
   const totalQ=c.sections.reduce((a,s)=>a+s.count,0);
   if(totalQ>pool){ toast("抽题总数 "+totalQ+" 超过范围内可用题数 "+pool+", 请调整"); return; }
   this._run(this.buildCustomRule());
+};
+Exam.fitToPool=function(pool){
+  const secs=this.custom.sections;
+  const totalQ=secs.reduce((a,s)=>a+s.count,0);
+  if(!totalQ||!pool) return;
+  let acc=0;
+  secs.forEach(s=>{ s.count=Math.max(1,Math.floor(s.count*pool/totalQ)); acc+=s.count; });
+  if(acc>pool) secs[0].count=Math.max(1,secs[0].count-(acc-pool));
+  else if(acc<pool) secs[0].count+=pool-acc;
+  this.renderCustom();
+  toast("已将抽题数量调整为 "+pool+" 题");
 };
 /* ---- 章节选择 & 预设规则载入 ---- */
 Exam.loadRule=function(id){
@@ -765,20 +776,35 @@ function vTree(){
   Tree.draw();
 }
 const Tree={
+  kpKey(t){ const m=(t||"").match(/^(\d+(?:\.\d+)*)/); if(m) return m[1].split(".").map(n=>+n);
+    const m2=(t||"").match(/^[（(]?(\d+)[）)、.，,]/); if(m2) return [90,+m2[1]]; return null; },
+  kpCmp(a,b){ const ka=this.kpKey(a),kb=this.kpKey(b);
+    if(!ka&&!kb) return 0; if(!ka) return 1; if(!kb) return -1;
+    for(let i=0;i<Math.max(ka.length,kb.length);i++){ const x=ka[i]||0,y=kb[i]||0; if(x!==y) return x-y; } return 0; },
+  chapterKids(cid){
+    let kids=(IDX.kpKids[cid]||[]).slice();
+    if(!kids.length) kids=Object.keys(IDX.kp).filter(id=>{ const k=IDX.kp[id];
+      return k.chapterId===cid&&(!k.parentId||!IDX.kp[k.parentId]||k.parentId===cid); });
+    return kids.sort((x,y)=>this.kpCmp((IDX.kp[x]||{}).title,(IDX.kp[y]||{}).title));
+  },
   draw(){
     const kw=($("#tree-q").value||"").toLowerCase();
     const html=Object.entries(IDX.ch).map(([cid,c])=>{
-      const kids=(IDX.kpKids[cid]||[]).map(kid=>Tree.node(kid,kw)).join("");
+      const kidIds=this.chapterKids(cid);
+      const kids=kidIds.map(kid=>Tree.node(kid,kw)).join("");
+      const qn=allQ().filter(q=>q.chapterId===cid||q.chapterId.startsWith(cid+"-")).length;
       const match=!kw||c.title.toLowerCase().includes(kw);
       if(kw&&!match&&!kids) return "";
-      return `<div class="tree-node"><div class="lb" onclick="Tree.detail('${cid}')"><b>${esc(c.title)}</b></div>
+      return `<div class="tree-node"><div class="lb" onclick="Tree.detail('${cid}')"><b>${esc(c.title)}</b>
+        <span class="muted" style="font-size:11px;margin-left:6px">${qn?qn+"题":""}${kids?"":" · 本章暂无知识点数据"}</span></div>
         ${kids?'<div class="tree-kids">'+kids+"</div>":""}</div>`;
     }).join("");
     $("#tree-box").innerHTML=html||'<span class="muted">无匹配知识点</span>';
   },
   node(kid,kw){
     const kp=IDX.kp[kid]; if(!kp) return "";
-    const kids=(IDX.kpKids[kid]||[]).map(k=>Tree.node(k,kw)).join("");
+    const kidIds=(IDX.kpKids[kid]||[]).slice().sort((x,y)=>this.kpCmp((IDX.kp[x]||{}).title,(IDX.kp[y]||{}).title));
+    const kids=kidIds.map(k=>Tree.node(k,kw)).join("");
     const match=!kw||(kp.title||"").toLowerCase().includes(kw)||(kp.content||"").toLowerCase().includes(kw);
     if(kw&&!match&&!kids) return "";
     const m=kpMastery(kid); const pct=m===null?0:Math.round(m*100);
@@ -886,14 +912,63 @@ function vPlan(){
     <label>每日新卡</label><input type="number" id="plan-new" value="${ST.settings.dailyNew}" style="width:80px">
     <button class="btn" onclick="Plan.save()">保存</button></div>
     <div class="muted" style="margin-top:8px">配额 = 剩余题量 ÷ 剩余天数 × 近3天完成率系数(0.8/1.0/1.2); 距考试≤14天自动进入冲刺模式。</div></div>
-  <div class="card"><h2 style="font-size:14px">今日任务</h2><div id="plan-today"></div></div>`;
+  <div class="card"><h2 style="font-size:14px">今日任务</h2><div id="plan-today"></div></div>
+  <div class="card"><h2 style="font-size:14px">AI 智能规划 <span class="muted" style="font-size:11px">(需先在设置里配置 AI 接口)</span></h2>
+    <div class="row" style="margin-top:8px;flex-wrap:wrap">
+      <label>每日可学习</label><input type="number" id="ai-min" value="120" style="width:70px"><label>分钟</label>
+      <button class="btn" onclick="Plan.aiGen(false)">${ST.aiPlan?"重新生成":"AI 生成学习计划"}</button>
+      ${ST.aiPlan?'<button class="btn ghost" onclick="Plan.aiGen(true)">结合进度动态调整</button>':""}</div>
+    <div id="ai-plan-out"></div></div>`;
   renderPlanMini($("#plan-today"));
+  Plan.renderAi();
 }
 const Plan={save(){
   ST.settings.examDate=$("#plan-date").value;
   ST.settings.dailyBrush=+$("#plan-brush").value||50;
   ST.settings.dailyNew=+$("#plan-new").value||20;
   Store.save("settings"); vPlan(); toast("计划已更新");
+},
+aiStats(){
+  return Object.entries(IDX.ch).map(([cid,c])=>{
+    const qs=allQ().filter(q=>q.chapterId===cid||q.chapterId.startsWith(cid+"-"));
+    const dn=qs.filter(q=>prog(q.id).a>0);
+    const ok=dn.filter(q=>prog(q.id).c>prog(q.id).w).length;
+    return {章:c.title,题量:qs.length,已刷:dn.length,正确率:dn.length?Math.round(ok/dn.length*100)+"%":"未刷"};
+  });
+},
+async aiGen(adjust){
+  const cfg=ST.settings.ai||{};
+  if(!cfg.url||!cfg.key){ toast("请先到 设置 → AI 接口 填写接口地址与密钥"); return; }
+  const mins=+($("#ai-min")||{}).value||120;
+  const stats=this.aiStats();
+  const prompt=`你是备考规划专家。请为以下考生制定/调整备考学习计划。
+考试日期: ${ST.settings.examDate||"未设置"}; 今天: ${today()}; 每日可学习: ${mins}分钟; 每日目标: 刷题${ST.settings.dailyBrush}题+新卡${ST.settings.dailyNew}张。
+各科目掌握情况(章: 题量/已刷/正确率): ${stats.map(c=>c.章+"("+c.题量+"题,已刷"+c.已刷+","+c.正确率+")").join("；")}。
+${adjust&&ST.aiPlan?"这是之前的计划与当前进度, 请重点调整未完成部分并动态调整重点: "+JSON.stringify(ST.aiPlan).slice(0,1800):"请按时间分阶段(基础/强化/冲刺)。"}
+只输出 JSON, 不要 markdown 代码块, 结构: {"summary":"总体策略一句话","phases":[{"name":"阶段名","dateRange":"MM.DD-MM.DD","goals":["目标"],"dailyTasks":["每日安排"],"focus":["重点章节"]}],"weekly":[{"week":"第1周","task":"本周重点"}]}`;
+  const out=$("#ai-plan-out"); if(out) out.innerHTML='<div class="muted">AI 正在生成计划, 请稍候…</div>';
+  try{
+    const r=await fetch(cfg.url.replace(/\/+$/,"")+"/chat/completions",{method:"POST",
+      headers:{"Content-Type":"application/json",Authorization:"Bearer "+cfg.key},
+      body:JSON.stringify({model:cfg.model||"deepseek-chat",messages:[{role:"user",content:prompt}],temperature:0.4})});
+    if(!r.ok) throw new Error("HTTP "+r.status+" "+(await r.text()).slice(0,140));
+    const j=await r.json();
+    let txt=(j.choices[0].message.content||"").trim().replace(/^```(json)?/i,"").replace(/```$/,"").trim();
+    const plan=JSON.parse(txt);
+    plan.generatedAt=today(); plan.adjusted=!!adjust; ST.aiPlan=plan; Store.save("aiPlan");
+    this.renderAi(); toast(adjust?"AI 已按进度调整计划":"AI 计划已生成");
+  }catch(e){ if(out) out.innerHTML='<div class="muted" style="color:#c0392b">生成失败: '+esc(String(e.message||e))+'<br>请检查 AI 接口配置(地址/Key/模型名)或换支持浏览器直连的服务商。</div>'; }
+},
+renderAi(){
+  const out=$("#ai-plan-out"); if(!out) return;
+  const p=ST.aiPlan; if(!p){ out.innerHTML=""; return; }
+  out.innerHTML=`<div class="muted" style="margin:10px 0 4px">${esc(p.summary||"")}<span style="margin-left:8px">(${p.adjusted?"已按进度动态调整":"生成于 "+esc(p.generatedAt||"")})</span></div>
+  ${(p.phases||[]).map(ph=>`<div style="border-left:3px solid var(--pri);padding:4px 10px;margin:10px 0">
+    <b>${esc(ph.name||"")}</b> <span class="muted">${esc(ph.dateRange||"")}</span>
+    ${(ph.focus&&ph.focus.length)?`<div class="muted" style="font-size:12px">重点: ${esc([].concat(ph.focus).join("、"))}</div>`:""}
+    ${(ph.goals||[]).map(g=>`<div style="margin-top:2px">· ${esc(g)}</div>`).join("")}
+    ${(ph.dailyTasks||[]).map(t=>`<div class="muted" style="font-size:12px">▸ ${esc(t)}</div>`).join("")}</div>`).join("")}
+  ${(p.weekly||[]).map(w=>`<div class="row" style="margin:2px 0"><span class="muted" style="width:64px">${esc(w.week||"")}</span><span style="font-size:13px">${esc(w.task||"")}</span></div>`).join("")}`;
 }};
 
 /* ================= 校对台 ================= */
@@ -922,13 +997,21 @@ Proof.draw=function(){
     <div class="row" style="align-items:flex-start;margin-top:10px">
       <div style="flex:1;min-width:300px">${(q.media||[]).map(m=>`<img class="media-img" src="${mediaSrc(m)}" onerror="this.outerHTML='<span class=muted>原图缺失(${esc(m.src)})</span>'">`).join("")||'<span class="muted">无原图</span>'}</div>
       <div class="grow">
-        <label class="muted">题干</label><textarea id="pf-stem" rows="3">${esc(q.stem)}</textarea>
-        <label class="muted">选项 (每行 A|文本)</label><textarea id="pf-opts" rows="4">${esc(q.options.map(o=>o.key+"|"+o.text).join("\n"))}</textarea>
+        <label class="muted">渲染预览（实际显示效果）</label>
+        <div style="border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:8px 10px;margin:4px 0 8px;background:rgba(128,128,128,.05)">
+          <div class="stem">${subT(q.stem)}</div>
+          <div style="margin-top:6px">${q.options.map(o=>`<div style="margin:3px 0"><b>${o.key}.</b> ${subT(o.text)}</div>`).join("")}</div>
+          <div style="margin-top:8px;border-top:1px dashed rgba(128,128,128,.3);padding-top:6px"><b class="muted">解析：</b>${q.analysis?subT(q.analysis):'<span class="muted">（无解析）</span>'}</div>
+        </div>
         <div class="row" style="margin-top:6px">
           <label class="muted">答案</label>
           <select id="pf-ans">${["","A","B","C","D"].map(k=>`<option ${q.answer.resolved===k?"selected":""}>${k}</option>`).join("")}</select>
           <span class="muted">答案键:${q.answer.fromKey||"-"} · 解析推得:${q.answer.fromAnalysis||"-"}</span></div>
-        <label class="muted" style="margin-top:6px">解析</label><textarea id="pf-ana" rows="3">${esc(q.analysis)}</textarea>
+        <details style="margin-top:6px"><summary class="muted" style="cursor:pointer">编辑原文（改完保存生效）</summary>
+          <label class="muted">题干</label><textarea id="pf-stem" rows="3">${esc(q.stem)}</textarea>
+          <label class="muted">选项 (每行 A|文本)</label><textarea id="pf-opts" rows="4">${esc(q.options.map(o=>o.key+"|"+o.text).join("\n"))}</textarea>
+          <label class="muted" style="margin-top:6px">解析</label><textarea id="pf-ana" rows="3">${esc(q.analysis)}</textarea>
+        </details>
         <div class="row" style="margin-top:8px">
           <button class="btn ok" onclick="Proof.save(true)">保存并下一题</button>
           <button class="btn gray" onclick="Proof.save(false)">跳过</button></div>
@@ -1024,9 +1107,16 @@ function vSet(){
       <button class="btn sm" onclick="Settings.save()">保存</button>
       <button class="btn sm ghost" onclick="Settings.sync(1)">推送</button>
       <button class="btn sm ghost" onclick="Settings.sync(0)">拉取</button></div>
-    <div class="muted" style="margin-top:8px">先在 Supabase SQL 编辑器建表:<br>
+      <div class="muted" style="margin-top:8px">先在 Supabase SQL 编辑器建表:<br>
       <code>create table beikao_state(id text primary key, data jsonb, updated_at timestamptz default now());</code>
       · 仅同步进度/错题/SRS/计划, 题库本体不上传。</div></div>
+  <div class="card"><h2 style="font-size:14px">AI 接口 (用于智能学习计划)</h2>
+    <div class="row" style="margin-top:8px;flex-wrap:wrap">
+      <input id="set-aiurl" placeholder="OpenAI 兼容接口, 如 https://api.deepseek.com/v1" value="${esc((ST.settings.ai||{}).url||"")}" style="flex:2;min-width:260px">
+      <input id="set-aikey" placeholder="API Key" value="${esc((ST.settings.ai||{}).key||"")}" style="flex:1;min-width:150px">
+      <input id="set-aimodel" placeholder="模型名, 如 deepseek-chat" value="${esc((ST.settings.ai||{}).model||"")}" style="width:150px">
+      <button class="btn sm" onclick="Settings.save()">保存</button></div>
+    <div class="muted" style="margin-top:8px">支持任何 OpenAI 兼容接口 (DeepSeek / 硅基流动 / Kimi 等); Key 仅保存在本地浏览器, 不随同步上传。若提示跨域(CORS)失败, 请换支持浏览器直连的服务商。</div></div>
   <div class="card"><h2 style="font-size:14px">数据管理</h2><div class="row" style="margin-top:8px">
     <button class="btn sm ghost" onclick="Settings.exportAll()">导出全部进度 (JSON)</button>
     <label class="btn sm ghost" style="cursor:pointer">导入进度<input type="file" accept=".json" style="display:none" onchange="Settings.importAll(this)"></label>
@@ -1036,6 +1126,7 @@ const Settings={
   save(){ ST.settings.theme=$("#set-theme").value;
     ST.settings.supabaseUrl=$("#set-sburl").value.trim();
     ST.settings.supabaseKey=$("#set-sbkey").value.trim();
+    ST.settings.ai={url:$("#set-aiurl").value.trim(),key:$("#set-aikey").value.trim(),model:$("#set-aimodel").value.trim()||"deepseek-chat"};
     Store.save("settings"); document.body.dataset.theme=ST.settings.theme; toast("已保存"); },
   async sync(push){
     if(!ST.settings.supabaseUrl||!ST.settings.supabaseKey){ toast("请先填 Supabase URL 和 anon key"); return; }
@@ -1219,14 +1310,106 @@ function vLib(){
     <div class="row" style="margin-bottom:8px">
       <input id="lib-search" placeholder="搜索摘录内容/标签..." style="flex:1" oninput="Lib.renderExcerpts()">
       <button class="btn sm ghost" onclick="Lib.exportExcerpts()">导出摘录 JSON</button></div>
-    <div id="lib-excerpts"></div></div>`;
+    <div id="lib-excerpts"></div></div>
+  <div class="card"><h2 style="font-size:14px">视频资料 <span class="muted" style="font-size:11px">(进度记忆 · 倍速 · 按章节分类)</span></h2>
+    <div class="row" style="margin-top:6px;flex-wrap:wrap">
+      <input id="vid-title" placeholder="标题(可选)" style="width:140px">
+      <input id="vid-url" placeholder="视频链接(URL, 如网课地址)" style="flex:1;min-width:200px">
+      <select id="vid-chap">${Lib.vidChapOptions("")}</select>
+      <button class="btn sm" onclick="Lib.vidAddUrl()">添加链接</button>
+      <label class="btn sm ghost" style="cursor:pointer">选本地文件<input type="file" accept="video/*" style="display:none" onchange="Lib.vidAddFile(this)"></label></div>
+    <div class="muted" style="font-size:11px;margin-top:4px">本地文件因浏览器安全限制, 刷新后需重新选择文件, 但观看进度会按文件名自动恢复。</div>
+    <div class="row" style="margin-top:6px"><input id="vid-kw" placeholder="按标题/章节筛选..." style="flex:1" oninput="Lib.vidRender()"></div>
+    <div id="vid-list" class="row" style="margin-top:8px;flex-wrap:wrap"></div>
+    <div id="vid-player"></div></div>`;
   Lib.renderExcerpts();
+  Lib.vidRender();
   if(window.removeEventListener){ window.removeEventListener("beforeunload",Lib._bu);
     Lib._bu=()=>Lib.stopTimer(); window.addEventListener("beforeunload",Lib._bu);
     document.removeEventListener("visibilitychange",Lib._vis);
     Lib._vis=()=>{ if(document.hidden) Lib.stopTimer(); else if(Lib.book) Lib.startTimer(); };
     document.addEventListener("visibilitychange",Lib._vis); }
 }
+
+/* ---- 视频资料库 ---- */
+Lib.vidChapOptions=function(cur){
+  return '<option value="">未分类</option>'+(BANK.chapters||[]).map(c=>`<option value="${c.id}" ${cur===c.id?"selected":""}>${esc(c.title)}</option>`).join("");
+};
+Lib.vidAddUrl=function(){
+  const url=$("#vid-url").value.trim(); if(!url){ toast("请输入视频链接"); return; }
+  ST.videos=ST.videos||[];
+  ST.videos.push({id:"v"+Date.now(),title:$("#vid-title").value.trim()||("视频 "+(ST.videos.length+1)),
+    url,chapterId:$("#vid-chap").value||"",pos:0,rate:1,dur:0,ts:Date.now()});
+  Store.save("videos"); $("#vid-url").value=""; $("#vid-title").value="";
+  Lib.vidRender(); toast("视频已添加");
+};
+Lib.vidAddFile=function(inp){
+  const f=inp.files&&inp.files[0]; if(!f) return;
+  ST.videos=ST.videos||[];
+  const prev=ST.videos.find(x=>x.title===f.name);   // 同名文件恢复上次进度
+  ST.videos.push({id:"v"+Date.now(),title:f.name,url:URL.createObjectURL(f),local:true,
+    chapterId:$("#vid-chap").value||(prev&&prev.chapterId)||"",pos:(prev&&prev.pos)||0,rate:(prev&&prev.rate)||1,dur:(prev&&prev.dur)||0,ts:Date.now()});
+  Store.save("videos"); Lib.vidRender(); toast("已添加本地视频"+(prev?"(进度已按同名文件恢复)":"")); inp.value="";
+};
+Lib.vidDel=function(id){
+  if(!confirm("删除该视频记录?")) return;
+  ST.videos=(ST.videos||[]).filter(x=>x.id!==id);
+  Store.save("videos"); Lib.vidRender();
+  if(Lib._curVid===id){ $("#vid-player").innerHTML=""; Lib._curVid=null; }
+};
+Lib.vidRender=function(){
+  const box=$("#vid-list"); if(!box) return;
+  ST.videos=ST.videos||[];
+  const kw=((($("#vid-kw")||{}).value)||"").toLowerCase();
+  const items=ST.videos.filter(v=>!kw||(v.title||"").toLowerCase().includes(kw)||(v.chapterId||"").toLowerCase().includes(kw));
+  box.innerHTML=items.length?items.map(v=>{
+    const pct=v.dur?Math.min(100,Math.round((v.pos||0)/v.dur*100)):0;
+    return `<div class="opt" style="width:auto;min-width:230px;max-width:280px" onclick="Lib.vidPlay('${v.id}')">
+      <div class="row" style="justify-content:space-between"><b style="font-size:12px">${esc((v.title||"").slice(0,22))}</b><span class="muted">${v.rate||1}x</span></div>
+      <div class="bar" style="margin:6px 0"><i style="width:${pct}%"></i></div>
+      <div class="muted" style="font-size:11px">${esc(chapPath(v.chapterId)||"未分类")} · ${v.local?"本地":"链接"} · 已看 ${pct}%</div>
+      <button class="btn sm bad" style="margin-top:4px" onclick="event.stopPropagation();Lib.vidDel('${v.id}')">删除</button></div>`;
+  }).join(""):'<span class="muted">暂无视频, 在上方添加链接或选择本地文件</span>';
+};
+Lib.vidPlay=function(id){
+  const v=(ST.videos||[]).find(x=>x.id===id); if(!v) return;
+  Lib._curVid=id; Lib._lastSave=0;
+  const area=$("#vid-player");
+  area.innerHTML=`<div class="card" style="margin-top:10px"><h2 style="font-size:14px">${esc(v.title)}</h2>
+    <video id="vid-el" src="${esc(v.url)}" controls playsinline style="width:100%;max-height:56vh;border-radius:8px;background:#000;margin-top:6px"
+      onloadedmetadata="Lib.vidMeta()" ontimeupdate="Lib.vidTick()"></video>
+    <div class="row" style="margin-top:8px;align-items:center;flex-wrap:wrap">
+      <span class="muted">倍速</span>
+      ${[0.75,1,1.25,1.5,1.75,2].map(r=>`<button class="btn sm ${(v.rate||1)===r?"":"ghost"}" onclick="Lib.vidRate(${r})">${r}x</button>`).join("")}
+      <span class="muted grow" id="vid-stat"></span>
+      <label class="muted">分类</label>
+      <select onchange="Lib.vidChap(this.value)">${Lib.vidChapOptions(v.chapterId)}</select></div></div>`;
+  area.scrollIntoView({behavior:"smooth",block:"nearest"});
+};
+Lib.vidCur=function(){ return (ST.videos||[]).find(x=>x.id===Lib._curVid); };
+Lib.vidMeta=function(){
+  const el=$("#vid-el"), v=Lib.vidCur(); if(!el||!v) return;
+  v.dur=el.duration||v.dur||0;
+  if(v.pos>5&&el.duration&&v.pos<el.duration-10) el.currentTime=v.pos;   // 恢复进度
+  el.playbackRate=v.rate||1;
+  const st=$("#vid-stat"); if(st) st.textContent="已看 "+Math.floor((v.pos||0)/60)+" 分钟";
+};
+Lib.vidTick=function(){
+  const el=$("#vid-el"), v=Lib.vidCur(); if(!el||!v) return;
+  v.pos=el.currentTime||0; v.dur=el.duration||v.dur||0;
+  const st=$("#vid-stat"); if(st&&v.dur) st.textContent="进度 "+Math.round(v.pos/v.dur*100)+"% · 已看 "+Math.floor(v.pos/60)+" 分钟";
+  const now=Date.now();
+  if(now-(Lib._lastSave||0)>5000){ Lib._lastSave=now; Store.save("videos"); }   // 每5秒存一次进度
+};
+Lib.vidRate=function(r){
+  const el=$("#vid-el"), v=Lib.vidCur(); if(!v) return;
+  v.rate=r; if(el) el.playbackRate=r;
+  Store.save("videos"); Lib.vidPlay(v.id);   // 重绘按钮选中态
+};
+Lib.vidChap=function(cid){
+  const v=Lib.vidCur(); if(!v) return;
+  v.chapterId=cid||""; Store.save("videos"); Lib.vidRender();
+};
 
 /* ================= 路由 ================= */
 const ROUTES={home:vHome,brush:vBrush,exam:vExam,cards:vCards,tree:vTree,lib:vLib,wrong:vWrong,plan:vPlan,proof:vProof,stats:vStats,set:vSet,fish:vFish};
