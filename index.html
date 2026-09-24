@@ -147,6 +147,25 @@ function Q(id){ // 应用校对覆盖
 }
 function allQ(){ return BANK.questions.map(q=>Q(q.id)).filter(Boolean); }
 
+/* ---- 书籍元数据: 内置题库 + 导入题库统一视图 (真实标题/源文件名) ---- */
+let _bmCache=null,_bmSig=null;
+function bookMetaAll(){
+  let raw=null; try{ raw=localStorage.getItem("bk-imports"); }catch(e){}
+  const sig=raw?raw.length+":"+((raw.match(/"name"/g)||[]).length):"0";
+  if(_bmCache&&_bmSig===sig) return _bmCache;
+  const list=(BANK.books||[]).map(b=>{ const t=b.title||(b.source&&b.source.fileName)||String(b.bankId||"");
+    return {tag:String(b.bankId||"").toLowerCase(),title:t,short:t.length>14?t.slice(0,13)+"…":t,book:b}; });
+  Imports.all().forEach((imp,i)=>{ let d=null; try{ d=JSON.parse(imp.json); }catch(e){ return; }
+    if(d&&(d.questions||[]).length&&!((d.knowledgePoints||[]).length)){
+      const t=imp.name.replace(/\.json$/i,"");
+      list.push({tag:"i"+i+"_",title:t,short:t.length>14?t.slice(0,13)+"…":t,imp:true}); } });
+  _bmCache=list; _bmSig=sig; return list;
+}
+function bookOfCh(cid){ if(!cid) return null;
+  const l=bookMetaAll();
+  for(let i=l.length-1;i>=0;i--){ const t=l[i].tag; if(cid===t||cid.startsWith(t)) return l[i]; }
+  return null; }
+
 /* ================= 本地存储 (IndexedDB + localStorage 兜底) ================= */
 const ST = {progress:{}, srs:{}, settings:{examDate:"",dailyNew:20,dailyBrush:50,theme:"light",
   supabaseUrl:"",supabaseKey:""}, plan:{}, exams:[], overrides:{}, daily:{},
@@ -251,6 +270,13 @@ function vHome(){
 /* ================= 刷题 ================= */
 const Brush={f:{book:"",ch:"",mode:"seq",scope:"all",n:50},queue:[],pos:0,showA:false,autoT:null,keyHandler:null};
 Brush.toggleImg=function(btn){const d=btn.nextElementSibling;if(d)d.style.display=d.style.display==="none"?"block":"none";};
+Brush.imgFail=function(el,label){   // 图片加载失败: 给出明确提示而非静默消失
+  const d=document.createElement("div"); d.className="muted";
+  d.style.cssText="margin:8px 0;font-size:12px;border:1px dashed rgba(128,128,128,.4);border-radius:8px;padding:8px";
+  d.textContent=label+(_LOCAL
+    ? "加载失败 — 本地 data 目录缺少该图片文件"
+    : "未在线上部署 — "+label.replace(/（.*?）/,"")+"整页原图体积过大(约760MB)未上传, 仅本地版可看; 题图(裁剪图)已部署。若题图也不显示, 请 Ctrl+F5 强制刷新清缓存");
+  el.replaceWith(d); };
 Brush.clearAuto=function(){if(Brush.autoT){clearTimeout(Brush.autoT);Brush.autoT=null;}};
 function buildQueue(){
   const f=Brush.f; let qs=allQ().filter(q=>q.stem&&q.options&&q.options.length>=2&&!q.incomplete);
@@ -270,12 +296,10 @@ function vBrush(){
   const el=$("#main");
   const chOpts=Object.entries(IDX.subs).map(([id,s])=>`<option value="${id}" ${Brush.f.ch===id?"selected":""}>${esc(s.chTitle.slice(0,12))} · ${esc(s.title)}</option>`);
   const chOpts2=Object.entries(IDX.ch).map(([id,c])=>`<option value="${id}" ${Brush.f.ch===id?"selected":""}>${esc(c.title)}</option>`);
+  const bookOpts=bookMetaAll().map(b=>`<option value="${esc(b.tag)}" ${Brush.f.book===b.tag?"selected":""}>${esc(b.title)}</option>`);
   el.innerHTML=`<h2>刷题</h2>
   <div class="card"><div class="row">
-    <select id="f-book"><option value="">全部书</option>
-      <option value="A" ${Brush.f.book==="A"?"selected":""}>A 习题解析</option>
-      <option value="B" ${Brush.f.book==="B"?"selected":""}>B 专业题集</option>
-      <option value="C" ${Brush.f.book==="C"?"selected":""}>C 一本通</option></select>
+    <select id="f-book"><option value="">全部书</option>${bookOpts}</select>
     <select id="f-ch"><option value="">全部章节</option>
       <optgroup label="章">${chOpts2}</optgroup><optgroup label="节">${chOpts}</optgroup></select>
     <select id="f-mode"><option value="seq" ${Brush.f.mode==="seq"?"selected":""}>顺序</option>
@@ -307,7 +331,7 @@ function drawQ(){
   area.innerHTML=`<div class="card">
     <div class="row" style="justify-content:space-between">
       <div><span class="tag">${esc(chapPath(q.chapterId))}</span>
-        <span class="muted">#${Brush.pos+1}/${Brush.queue.length} · 书${q.chapterId[0].toUpperCase()} · p${q.sourcePage||"?"}</span>
+        <span class="muted">#${Brush.pos+1}/${Brush.queue.length} · ${esc((bookOfCh(q.chapterId)||{}).short||("书"+(q.chapterId[0]||"?").toUpperCase()))} · p${q.sourcePage||"?"}</span>
         ${q.flag?'<span class="tag warn">旗标</span>':""}
         ${q.needsReview?'<span class="tag warn">待校对</span>':""}
         ${!resolved?'<span class="tag bad">答案待确认</span>':""}
@@ -319,8 +343,8 @@ function drawQ(){
       </div></div>
     <div class="stem">${subT(q.stem)}</div>
     ${(()=>{const fig=(q.media||[]).find(m=>m.type==="figure");const pg=q.media&&q.media.find(m=>m.type!=="figure");let h="";
-      if(fig)h+=`<div style="margin:8px 0;text-align:center"><img class="media-img" src="${mediaSrc(fig)}" alt="题图" onerror="this.style.display='none'"></div>`;
-      if(pg)h+=`<div style="margin:8px 0"><button class="btn sm ghost" onclick="Brush.toggleImg(this)">查看原题页</button><div style="display:none;margin-top:6px"><img class="media-img" src="${mediaSrc(pg)}" onerror="this.style.display='none'"><br><button class="btn sm ghost" style="margin-top:6px" onclick="Brush.toggleImg(this)">答案/解析在下一页 · 查看</button><div style="display:none;margin-top:6px"><img class="media-img" src="${nextPageSrc(pg)}" onerror="this.style.display='none'"></div></div></div>`;
+      if(fig)h+=`<div style="margin:8px 0;text-align:center"><img class="media-img" src="${mediaSrc(fig)}" alt="题图" onerror="Brush.imgFail(this,'题图（裁剪）')"></div>`;
+      if(pg)h+=`<div style="margin:8px 0"><button class="btn sm ghost" onclick="Brush.toggleImg(this)">查看原题页</button><div style="display:none;margin-top:6px"><img class="media-img" src="${mediaSrc(pg)}" onerror="Brush.imgFail(this,'原题页整页图')"><br><button class="btn sm ghost" style="margin-top:6px" onclick="Brush.toggleImg(this)">答案/解析在下一页 · 查看</button><div style="display:none;margin-top:6px"><img class="media-img" src="${nextPageSrc(pg)}" onerror="Brush.imgFail(this,'原题页整页图')"></div></div></div>`;
       return h;})()}
     <div id="opts">${optsHtml}</div>
     <div id="verdict"></div>
@@ -387,7 +411,7 @@ const Exam={rule:null,paper:null,start:0,timer:null,cur:0,answers:{},flags:{}};
 function vExam(){
   const el=$("#main");
   const rules=(BANK.examRules||[]).map(r=>`<div class="list-row"><div class="grow">
-    <b>${esc(r.name)}</b> <span class="muted">${r.sections.map(s=>s.count+"题/"+s.scorePerQuestion+"分").join(" + ")} · ${r.durationMinutes}分钟 · 覆盖 ${esc((r.scopeBooks||[]).join("/"))}</span></div>
+    <b>${esc(r.name)}</b> <span class="muted">${r.sections.map(s=>s.count+"题/"+s.scorePerQuestion+"分").join(" + ")} · ${r.durationMinutes}分钟 · 覆盖 ${esc((r.scopeBooks||[]).map(t=>{ const m=bookMetaAll().find(x=>x.tag===String(t).toLowerCase()); return m?m.short:t; }).join("/"))}</span></div>
     <button class="btn sm ghost" onclick='Exam.loadRule(${JSON.stringify(r.id)})'>载入修改</button>
     <button class="btn sm" onclick='Exam.begin(${JSON.stringify(r.id)})'>开考</button></div>`).join("");
   el.innerHTML=`<h2>模拟考试</h2>
@@ -402,7 +426,7 @@ function vExam(){
   Exam.renderCustom();
 };
 /* ---- 自定义组卷表单（可视化, 免写 JSON） ---- */
-Exam.custom={name:"自定义模拟卷",duration:120,books:{a:true,b:true,c:true},chapters:[],
+Exam.custom={name:"自定义模拟卷",duration:120,books:null,chapters:[],   // books:null = 全选, 渲染时按真实书目展开
   sections:[{type:"single_choice",count:60,scorePerQuestion:1,preferWrong:false}]};
 const TYPE_LABEL={single_choice:"单选题",multi_choice:"多选题",judge:"判断题",true_false:"判断题",fill:"填空题",case:"案例题",short_answer:"简答题"};
 Exam.typeOptions=function(sel){
@@ -419,11 +443,12 @@ Exam.qPoolCount=function(books,chapters){
 Exam.renderCustom=function(){
   const box=$("#custom-form"); if(!box) return;
   const c=this.custom;
+  if(!c.books) c.books=Object.fromEntries(bookMetaAll().map(b=>[b.tag,true]));   // 默认全选
   box.innerHTML=`
     <div class="row" style="gap:14px;flex-wrap:wrap;margin-top:4px">
       <label>卷名 <input type="text" value="${esc(c.name)}" style="width:150px" oninput="Exam.custom.name=this.value;Exam.updateSummary()"></label>
       <label>时长 <input type="number" min="1" value="${c.duration}" style="width:64px" oninput="Exam.custom.duration=+this.value||1;Exam.updateSummary()"> 分钟</label>
-      <span>覆盖范围：</span>${["a","b","c"].map(b=>`<label><input type="checkbox" ${c.books[b]?"checked":""} onchange="Exam.custom.books['${b}']=this.checked;Exam.updateSummary()"> 书${b.toUpperCase()}</label>`).join(" ")}
+      <span>覆盖范围：</span>${bookMetaAll().map(b=>`<label title="${esc(b.title)}"><input type="checkbox" ${c.books[b.tag]?"checked":""} onchange="Exam.custom.books['${esc(b.tag)}']=this.checked;Exam.updateSummary()"> ${esc(b.short)}</label>`).join(" ")}
     </div>
     ${c.sections.map((s,i)=>`<div class="row" style="gap:10px;flex-wrap:wrap;align-items:center;margin-top:8px">
       <b class="muted" style="font-size:12px">段落${i+1}</b>
@@ -456,7 +481,8 @@ Exam.delSec=function(i){
 };
 Exam.effBooks=function(){
   const c=this.custom, chs=c.chapters||[];
-  if(chs.length) return [...new Set(chs.map(id=>(id[0]||"a").toLowerCase()))];
+  if(chs.length) return [...new Set(chs.map(id=>{ const m=bookOfCh(id); return m?m.tag:(id[0]||"a").toLowerCase(); }))];
+  if(!c.books) c.books=Object.fromEntries(bookMetaAll().map(b=>[b.tag,true]));
   return Object.keys(c.books).filter(k=>c.books[k]);
 };
 Exam.updateSummary=function(){
@@ -468,7 +494,7 @@ Exam.updateSummary=function(){
   const pool=this.qPoolCount(books,chs);
   const parts=[];
   parts.push(`总分 <b>${+total.toFixed(1)}</b> 分 · 共 <b>${totalQ}</b> 题 · 时长 ${c.duration} 分钟`);
-  parts.push(books.length?`覆盖 ${books.map(b=>"书"+b.toUpperCase()).join("/")}`:`<span style="color:#c0392b">未选择任何书</span>`);
+  parts.push(books.length?`覆盖 ${books.map(t=>{ const m=bookMetaAll().find(x=>x.tag===t); return esc(m?m.short:t); }).join("/")}`:`<span style="color:#c0392b">未选择任何书</span>`);
   if(chs.length) parts.push(`章节 <b>${chs.length}</b> 节`);
   if(books.length) parts.push(`范围内可用 <b>${pool}</b> 题`);
   let warn="";
@@ -484,7 +510,7 @@ Exam.updateSummary=function(){
   const ta=$("#rule-json"); if(ta) ta.value=JSON.stringify(this.buildCustomRule(),null,1);
 };
 Exam.rowBooksOf=function(s){
-  return [...new Set((s.chapterIds||[]).map(id=>(id[0]||"a").toLowerCase()))];
+  return [...new Set((s.chapterIds||[]).map(id=>{ const m=bookOfCh(id); return m?m.tag:(id[0]||"a").toLowerCase(); }))];
 };
 Exam.buildCustomRule=function(){
   const c=this.custom;
@@ -527,8 +553,8 @@ Exam.fitToPool=function(pool){
 /* ---- 章节选择 & 预设规则载入 ---- */
 Exam.loadRule=function(id){
   const r=(BANK.examRules||[]).find(x=>x.id===id); if(!r) return;
-  const books={a:false,b:false,c:false};
-  (r.scopeBooks||[]).forEach(b=>{ const k=(b||"")[0].toLowerCase(); if(k in books) books[k]=true; });
+  const books={}; bookMetaAll().forEach(b=>books[b.tag]=false);
+  (r.scopeBooks||[]).forEach(b=>{ const k=String(b||"").toLowerCase(); books[k]=true; });
   this.custom={name:r.name||"自定义模拟卷",duration:r.durationMinutes||120,books,chapters:[],
     sections:(r.sections||[]).map(s=>({type:s.type||"single_choice",count:s.count||10,scorePerQuestion:s.scorePerQuestion||1,preferWrong:!!s.preferWrong,chapterIds:[]}))};
   if(!this.custom.sections.length) this.custom.sections=[{type:"single_choice",count:20,scorePerQuestion:1,preferWrong:false,chapterIds:[]}];
@@ -845,12 +871,30 @@ const Tree={
     for(let i=0;i<Math.max(ka.length,kb.length);i++){ const x=ka[i]||0,y=kb[i]||0; if(x!==y) return x-y; } return 0; },
   chapterKids(cid){
     let kids=(IDX.kpKids[cid]||[]).slice();
-    if(!kids.length) kids=Object.keys(IDX.kp).filter(id=>{ const k=IDX.kp[id];
-      return k.chapterId===cid&&(!k.parentId||!IDX.kp[k.parentId]||k.parentId===cid); });
+    const assigned=new Set(kids);
+    // 无 parentId 的编号型知识点(如导入资料的 10.1/10.2): 无编号父级才算章直属主支
+    Object.keys(IDX.kp).forEach(id=>{ const k=IDX.kp[id];
+      if(k.chapterId!==cid||assigned.has(id)) return;
+      const realParent=k.parentId&&IDX.kp[k.parentId]&&k.parentId!==cid;
+      const numParent=this._numParentOf&&this._numParentOf[id];
+      if(!realParent&&!numParent) kids.push(id); });
     return kids.sort((x,y)=>this.kpCmp((IDX.kp[x]||{}).title,(IDX.kp[y]||{}).title));
+  },
+  _calcNumTree(){   // 依据标题编号推断父子 (10.1 -> 10.1.1), 供无 parentId 的资料分主支/次支
+    this._numKids={}; this._numParentOf={};
+    const byKey={};
+    for(const k of BANK.knowledgePoints||[]){ if(!IDX.kp[k.id]) continue;
+      const key=this.kpKey(k.title||"");
+      if(key&&k.chapterId) byKey[k.chapterId+"#"+key.join(".")]=k.id; }
+    for(const k of BANK.knowledgePoints||[]){ if(!IDX.kp[k.id]) continue;
+      const key=this.kpKey(k.title||"");
+      if(key&&key.length>1&&k.chapterId){
+        const pid=byKey[k.chapterId+"#"+key.slice(0,-1).join(".")];
+        if(pid&&pid!==k.id){ (this._numKids[pid]=this._numKids[pid]||[]).push(k.id); this._numParentOf[k.id]=pid; } } }
   },
   draw(){
     const kw=($("#tree-q").value||"").toLowerCase();
+    this._calcNumTree();
     const html=Object.entries(IDX.ch).map(([cid,c])=>{
       const kidIds=this.chapterKids(cid);
       const kids=kidIds.map(kid=>Tree.node(kid,kw)).join("");
@@ -865,7 +909,8 @@ const Tree={
   },
   node(kid,kw){
     const kp=IDX.kp[kid]; if(!kp) return "";
-    const kidIds=(IDX.kpKids[kid]||[]).slice().sort((x,y)=>this.kpCmp((IDX.kp[x]||{}).title,(IDX.kp[y]||{}).title));
+    const kidIds=[...new Set([...(IDX.kpKids[kid]||[]),...((this._numKids&&this._numKids[kid])||[])])]
+      .sort((x,y)=>this.kpCmp((IDX.kp[x]||{}).title,(IDX.kp[y]||{}).title));
     const kids=kidIds.map(k=>Tree.node(k,kw)).join("");
     const match=!kw||(kp.title||"").toLowerCase().includes(kw)||(kp.content||"").toLowerCase().includes(kw);
     if(kw&&!match&&!kids) return "";
@@ -1167,12 +1212,15 @@ function vSet(){
     <div class="row" style="margin-top:8px;flex-wrap:wrap;align-items:center">
       <input type="file" id="imp-files" accept=".json,application/json" multiple style="display:none" onchange="Imports.addFiles(this.files);this.value=''">
       <button class="btn sm" onclick="document.getElementById('imp-files').click()">导入题库 JSON（可多选）</button>
-      <span class="muted" style="font-size:12px">与内置题库合并，刷题/组卷/考试/闪卡均可用；保留原始文件名。</span></div>
+      <span class="muted" style="font-size:12px">与内置题库合并，保留原始文件名；含知识点的资料只导入章节与知识点（题目一律不导），知识树按标题层级显示。</span></div>
     <div id="imp-list" style="margin-top:8px">
-    ${Imports.all().map((im,i)=>`<div class="row" style="margin:4px 0">
-      <span style="flex:1">${esc(im.name)}</span>
-      <span class="muted" style="font-size:12px">${im.count}题 · ${im.date}</span>
-      <button class="btn sm ghost" onclick="Imports.del(${i})">删除</button></div>`).join("")
+    ${Imports.all().map((im,i)=>{ const kind=im.kind||(im.nq?( im.nk?"kp":"q"):"q");
+      const cnt=im.kind?[(im.nc?im.nc+"章":""),(im.nk?im.nk+"知识点":""),(im.nq?im.nq+"题":"")].filter(Boolean).join(" · ")
+        :((im.count||0)+"题");
+      return `<div class="row" style="margin:4px 0">
+      <span style="flex:1">${esc(im.name)} <span class="tag ${kind==="kp"?"ok":""}" style="font-size:10px">${kind==="kp"?"知识点资料(仅章节+知识点)":"题库"}</span></span>
+      <span class="muted" style="font-size:12px">${cnt} · ${im.date}</span>
+      <button class="btn sm ghost" onclick="Imports.del(${i})">删除</button></div>`; }).join("")
       ||'<span class="muted" style="font-size:12px">暂无导入资料</span>'}</div></div>
   <div class="card"><h2 style="font-size:14px">Supabase 同步 (可选)</h2>
     <div class="row" style="margin-top:8px">
@@ -1504,13 +1552,19 @@ const Imports={
   _save(l){ try{ localStorage.setItem("bk-imports",JSON.stringify(l)); return true; }
     catch(e){ toast("保存失败: 导入内容过大, 浏览器本地空间不足"); return false; } },
   apply(){   // 启动时并入 BANK (id 加前缀防冲突), 之后 buildIndexes 全局生效
+    // 合并策略: 含 knowledgePoints 的资料视为「知识点资料」——只并入章节+知识点, 不并入题目(含题干);
+    // 纯题库(仅 questions)才并入题目。
     this.all().forEach((imp,ni)=>{
       let b; try{ b=JSON.parse(imp.json); }catch(e){ return; }
       const px="i"+ni+"_";
       (b.chapters||[]).forEach(c=>BANK.chapters.push(Object.assign({},c,{id:px+c.id,
         children:(c.children||[]).map(s=>Object.assign({},s,{id:px+s.id}))})));
-      (b.knowledgePoints||[]).forEach(k=>BANK.knowledgePoints.push(Object.assign({},k,
-        {id:px+k.id,chapterId:px+(k.chapterId||""),parentId:k.parentId?px+k.parentId:k.parentId})));
+      const kps=b.knowledgePoints||[];
+      if(kps.length){
+        kps.forEach(k=>BANK.knowledgePoints.push(Object.assign({},k,
+          {id:px+k.id,chapterId:px+(k.chapterId||""),parentId:k.parentId?px+k.parentId:k.parentId})));
+        return;   // 知识点资料: 题目一律不导入
+      }
       (b.questions||[]).forEach(q=>BANK.questions.push(Object.assign({},q,{id:px+q.id,chapterId:px+(q.chapterId||"")})));
     });
   },
@@ -1519,9 +1573,10 @@ const Imports={
     const readNext=(arr,done)=>{ if(!arr.length){ done(); return; }
       const f=arr.shift(); const r=new FileReader();
       r.onload=()=>{ try{ const data=JSON.parse(r.result);
-          const n=(data.questions||[]).length;
-          if(!n){ toast(f.name+" 中无 questions, 已跳过"); }
-          else { list.push({name:f.name,date:new Date().toISOString().slice(0,10),count:n,json:r.result}); added++; }
+          const nq=(data.questions||[]).length, nk=(data.knowledgePoints||[]).length, nc=(data.chapters||[]).length;
+          if(!nq&&!nk){ toast(f.name+" 中无 questions/knowledgePoints, 已跳过"); }
+          else { list.push({name:f.name,date:new Date().toISOString().slice(0,10),
+              kind:nk?"kp":"q",nc,nq,nk,json:r.result}); added++; }
         }catch(e){ toast(f.name+" 解析失败, 已跳过"); }
         readNext(arr,done); };
       r.onerror=()=>{ toast(f.name+" 读取失败"); readNext(arr,done); };
