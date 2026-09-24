@@ -201,8 +201,9 @@ function download(name,text,mime){
   a.href=URL.createObjectURL(new Blob([text],{type:mime||"text/plain"}));
   a.download=name;a.click();
 }
-function mediaSrc(m){ return "../"+String(m.src||"").replace(/\\/g,"/"); }   // app/ 相对于项目根; 统一正斜杠以兼容 HTTP
-function nextPageSrc(m){ return "../"+String(m.src||"").replace(/\\/g,"/").replace(/page_(\d+)\.png/,(x,d)=>"page_"+(+d+1)+".png"); }   // 答案/解析常在下一页
+const _LOCAL=(location.protocol==="file:"||/^(localhost|127\.0\.0\.1)$/.test(location.hostname));
+function mediaSrc(m){ return (_LOCAL?"../":"")+String(m.src||"").replace(/\\/g,"/"); }   // 本地: app/ 相对项目根; 线上: 数据与站点同根
+function nextPageSrc(m){ return (_LOCAL?"../":"")+String(m.src||"").replace(/\\/g,"/").replace(/page_(\d+)\.png/,(x,d)=>"page_"+(+d+1)+".png"); }   // 答案/解析常在下一页
 const NAVS=[["home","首页","home"],["brush","刷题","brush"],["exam","模拟考试","exam"],
   ["cards","闪卡背诵","cards"],["tree","知识树","tree"],["lib","资料库","lib"],["wrong","错题本","wrong"],
   ["plan","学习计划","plan"],["proof","校对台","proof"],["stats","统计","stats"],["set","设置","set"]];
@@ -430,18 +431,22 @@ Exam.renderCustom=function(){
       <label>数量 <input type="number" min="1" value="${s.count}" style="width:60px" oninput="Exam.custom.sections[${i}].count=Math.max(1,+this.value||1);Exam.updateSummary()"> 题</label>
       <label>每题 <input type="number" min="0.5" step="0.5" value="${s.scorePerQuestion}" style="width:60px" oninput="Exam.custom.sections[${i}].scorePerQuestion=Math.max(0.5,+this.value||1);Exam.updateSummary()"> 分</label>
       <label class="muted"><input type="checkbox" ${s.preferWrong?"checked":""} onchange="Exam.custom.sections[${i}].preferWrong=this.checked;Exam.updateSummary()"> 只抽错题</label>
+      <button class="btn sm ghost" onclick="Exam.pickRowCh(${i})">指定章节</button>
+      <span class="muted" id="row-ch-${i}" style="font-size:11px"></span>
       <button class="btn sm ghost" onclick="Exam.delSec(${i})">删除</button></div>`).join("")}
     <div class="row" style="margin-top:8px"><button class="btn sm" onclick="Exam.addSec()">＋ 添加题型段落</button></div>
     <div class="row" style="margin-top:10px;align-items:center">
       <b class="muted" style="font-size:12px">章节范围：</b>
       <span id="ch-scope-label" class="muted">全部章节</span>
-      <button class="btn sm ghost" onclick="Exam.toggleChPicker()">选择章节</button></div>
-    <div id="chapter-picker" style="display:none;border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:8px;margin-top:6px;max-height:260px;overflow:auto"></div>`;
+      <button class="btn sm ghost" onclick="Exam.toggleChPicker()">选择章节</button>
+      <span class="muted" style="font-size:11px">· 也可给每个段落单独「指定章节」(如高数3题、流体力学4题)</span></div>
+    <div id="chapter-picker" style="display:none;border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:8px;margin-top:6px;max-height:260px;overflow:auto"></div>
+    <div id="row-ch-picker" style="display:none;border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:8px;margin-top:6px;max-height:260px;overflow:auto"></div>`;
   this.updateSummary();
 };
 Exam.addSec=function(){
   const t=(BANK.questions||[]).map(q=>q.type).filter(Boolean);
-  this.custom.sections.push({type:t[0]||"single_choice",count:20,scorePerQuestion:1,preferWrong:false});
+  this.custom.sections.push({type:t[0]||"single_choice",count:20,scorePerQuestion:1,preferWrong:false,chapterIds:[]});
   this.renderCustom();
 };
 Exam.delSec=function(i){
@@ -470,13 +475,26 @@ Exam.updateSummary=function(){
   if(books.length&&totalQ>pool) warn=` <a style="color:#c0392b;cursor:pointer;text-decoration:underline" onclick="Exam.fitToPool(${pool})">⚠ 超出可用题数, 点击自动调整为 ${pool} 题</a>`;
   sum.innerHTML=parts.join(" · ")+warn;
   const lbl=$("#ch-scope-label"); if(lbl) lbl.textContent=chs.length?("已选 "+chs.length+" 节"):"全部章节";
+  c.sections.forEach((s,i)=>{ const sp=$("#row-ch-"+i); if(!sp) return;
+    if(s.chapterIds&&s.chapterIds.length){
+      const rp=this.qPoolCount(this.rowBooksOf(s),s.chapterIds);
+      sp.textContent="限"+s.chapterIds.length+"节 · 可用"+rp+"题";
+      sp.style.color=rp<s.count?"#c0392b":"";
+    } else { sp.textContent=""; } });
   const ta=$("#rule-json"); if(ta) ta.value=JSON.stringify(this.buildCustomRule(),null,1);
+};
+Exam.rowBooksOf=function(s){
+  return [...new Set((s.chapterIds||[]).map(id=>(id[0]||"a").toLowerCase()))];
 };
 Exam.buildCustomRule=function(){
   const c=this.custom;
-  const books=this.effBooks();
+  const booksSet=new Set(this.effBooks());
+  c.sections.forEach(s=>this.rowBooksOf(s).forEach(b=>booksSet.add(b)));   // 段落章节隐含的书并入总范围
+  const books=[...booksSet];
   const chs=(c.chapters&&c.chapters.length)?[...c.chapters]:undefined;
-  const sections=c.sections.map(s=>({type:s.type,count:s.count,scorePerQuestion:s.scorePerQuestion,knowledgeWeight:{},difficultyDist:{},preferWrong:!!s.preferWrong}));
+  const sections=c.sections.map(s=>Object.assign(
+    {type:s.type,count:s.count,scorePerQuestion:s.scorePerQuestion,knowledgeWeight:{},difficultyDist:{},preferWrong:!!s.preferWrong},
+    (s.chapterIds&&s.chapterIds.length)?{chapterIds:[...s.chapterIds]}:{}));
   const totalScore=sections.reduce((a,s)=>a+s.count*s.scorePerQuestion,0);
   const rule={id:"rule-custom",name:c.name||"自定义模拟卷",totalScore:+totalScore.toFixed(1),durationMinutes:Math.max(1,c.duration|0),scopeBooks:books,coverage:"all",sections};
   if(chs) rule.scopeChapters=chs;
@@ -485,10 +503,14 @@ Exam.buildCustomRule=function(){
 Exam.beginCustom=function(){
   const c=this.custom, chs=c.chapters||[];
   const books=this.effBooks();
-  if(!books.length){ toast("请至少勾选一本书或选择章节作为覆盖范围"); return; }
+  if(!books.length&&!c.sections.some(s=>s.chapterIds&&s.chapterIds.length)){ toast("请至少勾选一本书或选择章节作为覆盖范围"); return; }
+  for(let i=0;i<c.sections.length;i++){ const s=c.sections[i];
+    if(s.chapterIds&&s.chapterIds.length){
+      const rp=this.qPoolCount(this.rowBooksOf(s),s.chapterIds);
+      if(s.count>rp){ toast("段落"+(i+1)+" 抽题数 "+s.count+" 超过所选章节可用 "+rp+" 题, 请调整"); return; } } }
   const pool=this.qPoolCount(books,chs);
   const totalQ=c.sections.reduce((a,s)=>a+s.count,0);
-  if(totalQ>pool){ toast("抽题总数 "+totalQ+" 超过范围内可用题数 "+pool+", 请调整"); return; }
+  if(!c.sections.every(s=>s.chapterIds&&s.chapterIds.length)&&totalQ>pool){ toast("抽题总数 "+totalQ+" 超过范围内可用题数 "+pool+", 请调整"); return; }
   this._run(this.buildCustomRule());
 };
 Exam.fitToPool=function(pool){
@@ -508,16 +530,39 @@ Exam.loadRule=function(id){
   const books={a:false,b:false,c:false};
   (r.scopeBooks||[]).forEach(b=>{ const k=(b||"")[0].toLowerCase(); if(k in books) books[k]=true; });
   this.custom={name:r.name||"自定义模拟卷",duration:r.durationMinutes||120,books,chapters:[],
-    sections:(r.sections||[]).map(s=>({type:s.type||"single_choice",count:s.count||10,scorePerQuestion:s.scorePerQuestion||1,preferWrong:!!s.preferWrong}))};
-  if(!this.custom.sections.length) this.custom.sections=[{type:"single_choice",count:20,scorePerQuestion:1,preferWrong:false}];
+    sections:(r.sections||[]).map(s=>({type:s.type||"single_choice",count:s.count||10,scorePerQuestion:s.scorePerQuestion||1,preferWrong:!!s.preferWrong,chapterIds:[]}))};
+  if(!this.custom.sections.length) this.custom.sections=[{type:"single_choice",count:20,scorePerQuestion:1,preferWrong:false,chapterIds:[]}];
   this.renderCustom();
   toast("已载入「"+(r.name||"规则")+"」, 修改后点「按此配置开考」");
 };
+Exam.chTarget={mode:"global",row:-1};   // 当前章节选择器写入目标: 全局 or 某段落
 Exam.toggleChPicker=function(){
   const box=$("#chapter-picker"); if(!box) return;
+  const rp=$("#row-ch-picker"); if(rp) rp.style.display="none";
   const show=box.style.display==="none";
   box.style.display=show?"block":"none";
-  if(show) this.renderChapterPicker();
+  if(show){ this.chTarget={mode:"global",row:-1}; this.renderChapterPicker(); }
+};
+Exam.pickRowCh=function(i){
+  const box=$("#row-ch-picker"); if(!box) return;
+  const gp=$("#chapter-picker"); if(gp) gp.style.display="none";
+  const show=box.style.display==="none"||this.chTarget.mode!=="row"||this.chTarget.row!==i;
+  box.style.display=show?"block":"none";
+  if(show){ this.chTarget={mode:"row",row:i}; this.renderChapterPicker(); }
+};
+Exam._selSet=function(){
+  const t=this.chTarget;
+  if(t.mode==="row"){ const s=this.custom.sections[t.row]; return new Set(s.chapterIds||[]); }
+  return new Set(this.custom.chapters||[]);
+};
+Exam._writeSet=function(set){
+  const t=this.chTarget;
+  if(t.mode==="row") this.custom.sections[t.row].chapterIds=[...set];
+  else this.custom.chapters=[...set];
+};
+Exam.clearRowCh=function(){
+  if(this.chTarget.mode==="row"){ this.custom.sections[this.chTarget.row].chapterIds=[];
+    this.renderChapterPicker(); this.updateSummary(); }
 };
 Exam.qCountBySub=function(){
   const m={};
@@ -525,11 +570,14 @@ Exam.qCountBySub=function(){
   return m;
 };
 Exam.renderChapterPicker=function(){
-  const box=$("#chapter-picker"); if(!box) return;
+  const box=this.chTarget.mode==="row"?$("#row-ch-picker"):$("#chapter-picker"); if(!box) return;
   const openIds=[...box.querySelectorAll("details[open]")].map(d=>d.dataset.ch);
-  const sel=new Set(this.custom.chapters||[]);
+  const sel=this._selSet();
   const cnt=this.qCountBySub();
-  box.innerHTML=(BANK.chapters||[]).map(ch=>{
+  const head=`<div class="row" style="margin-bottom:6px;align-items:center">
+    <span class="muted" style="font-size:12px">${this.chTarget.mode==="row"?("为段落 "+(this.chTarget.row+1)+" 选择章节(只在该段落抽题):"):"全局章节范围(所有段落受限):"}</span>
+    ${this.chTarget.mode==="row"?`<button class="btn sm ghost" onclick="Exam.clearRowCh()">清除限定</button>`:""}</div>`;
+  box.innerHTML=head+((BANK.chapters||[]).map(ch=>{
     const subs=ch.children||[];
     const allSel=subs.length&&subs.every(s=>sel.has(s.id));
     const n=subs.reduce((a,s)=>a+(cnt[s.id]||0),0);
@@ -537,19 +585,19 @@ Exam.renderChapterPicker=function(){
       <label style="display:inline-flex;align-items:center;gap:4px"><input type="checkbox" ${allSel?"checked":""} onchange="Exam.toggleCh('${ch.id}',this.checked)">
       <b style="font-size:12px">${esc(ch.title)}</b> <span class="muted">(${n}题)</span></label></summary>
       <div style="margin:4px 0 4px 20px">${subs.map(s=>`<label style="display:inline-block;margin:2px 10px 2px 0;font-size:12px"><input type="checkbox" ${sel.has(s.id)?"checked":""} onchange="Exam.toggleSub('${s.id}',this.checked)"> ${esc(s.title)} <span class="muted">(${cnt[s.id]||0})</span></label>`).join("")||"<span class='muted'>无小节</span>"}</div></details>`;
-  }).join("")||"<span class='muted'>题库无章节信息</span>";
+  }).join("")||"<span class='muted'>题库无章节信息</span>");
 };
 Exam.toggleCh=function(chId,on){
   const ch=(BANK.chapters||[]).find(c=>c.id===chId); if(!ch) return;
-  const set=new Set(this.custom.chapters||[]);
+  const set=this._selSet();
   (ch.children||[]).forEach(s=> on?set.add(s.id):set.delete(s.id));
-  this.custom.chapters=[...set];
+  this._writeSet(set);
   this.renderChapterPicker(); this.updateSummary();
 };
 Exam.toggleSub=function(id,on){
-  const set=new Set(this.custom.chapters||[]);
+  const set=this._selSet();
   on?set.add(id):set.delete(id);
-  this.custom.chapters=[...set];
+  this._writeSet(set);
   this.updateSummary();
 };
 Exam.begin=function(id){
@@ -560,7 +608,8 @@ Exam._run=function(rule){
   for(const sec of rule.sections||[]){
     let pool=allQ().filter(q=>q.stem&&q.options.length>=2&&!q.incomplete)
       .filter(q=>!rule.scopeBooks||rule.scopeBooks.some(b=>q.chapterId.startsWith(b.toLowerCase())))
-      .filter(q=>!rule.scopeChapters||!rule.scopeChapters.length||rule.scopeChapters.includes(q.chapterId));
+      .filter(q=>!rule.scopeChapters||!rule.scopeChapters.length||rule.scopeChapters.includes(q.chapterId))
+      .filter(q=>!sec.chapterIds||!sec.chapterIds.length||sec.chapterIds.includes(q.chapterId));
     if(!sec.preferWrong) pool=pool.filter(q=>q.answer.resolved);   // 判分优先有答案题
     // 加权: 错题 x3, 未做 x2
     const weighted=[];
@@ -596,6 +645,7 @@ Exam.draw=function(){
       <div><b>${esc(this.rule.name)}</b> <span class="muted">第 ${this.cur+1}/${flat.length} 题</span></div>
       <div class="row"><span class="tag warn">剩余 <b id="exam-timer">--:--</b></span>
         <button class="btn sm ghost" onclick="Exam.toggleFlag()">标记存疑</button>
+        <button class="btn sm gray" onclick="Exam.cancel()">取消</button>
         <button class="btn sm ok" onclick="Exam.submit()">交卷</button></div></div>
     <div class="stem">${subT(q.stem)}</div>
     ${q.options.map(o=>`<button class="opt ${this.answers[q.id]===o.key?"sel":""}" onclick="Exam.pick('${q.id}','${o.key}')"><b class="key">${o.key}.</b> ${subT(o.text)}</button>`).join("")}
@@ -608,6 +658,18 @@ Exam.draw=function(){
   this.tick(); renderMath(el);
 };
 Exam.pick=function(id,k){ this.answers[id]=k; this.draw(); };
+Exam.cancel=function(){
+  if(!this.paper) return;
+  if(!confirm("确定取消本次考试? 已作答内容不会保存")) return;
+  clearInterval(this.timer); this.paper=null; this.rule=null;
+  const el=$("#exam-area"); if(el) el.innerHTML="";
+  toast("考试已取消");
+};
+Exam.delReport=function(i){
+  if(!ST.exams[i]) return;
+  if(!confirm("删除这条考试报告? (已入错题本的记录不受影响)")) return;
+  ST.exams.splice(i,1); Store.save("exams"); vStats();
+};
 Exam.toggleFlag=function(){ const id=this.paper.flatMap(s=>s.qs)[this.cur]; this.flags[id]=!this.flags[id]; this.draw(); };
 Exam.go=function(i){ const n=this.paper.flatMap(s=>s.qs).length; this.cur=Math.max(0,Math.min(n-1,i)); this.draw(); };
 Exam.submit=function(){
@@ -1089,8 +1151,9 @@ function vStats(){
     ${rows.sort((a,b)=>a[3]-b[3]).map(r=>`<tr><td>${esc(r[0])}</td><td>${r[1]}</td><td>${r[2]}</td>
       <td style="background:${r[3]>=70?"var(--ok-bg)":r[3]>=40?"var(--warn-bg)":"var(--bad-bg)"}">${r[3]}%</td></tr>`).join("")}</table></div>
   ${ST.exams.length?`<div class="card"><h2 style="font-size:14px">模考趋势</h2>
-    ${ST.exams.slice(0,8).map(e=>`<div class="row" style="margin:4px 0"><span class="muted" style="width:150px">${e.date.slice(5,10)}</span>
-      <div class="bar grow"><i style="width:${e.acc}%"></i></div><span class="muted">${e.score}/${e.total} (${e.acc}%)</span></div>`).join("")}</div>`:""}`;
+    ${ST.exams.slice(0,8).map((e,i)=>`<div class="row" style="margin:4px 0"><span class="muted" style="width:150px">${e.date.slice(5,10)}</span>
+      <div class="bar grow"><i style="width:${e.acc}%"></i></div><span class="muted">${e.score}/${e.total} (${e.acc}%)</span>
+      <button class="btn sm ghost" onclick="Exam.delReport(${i})">删除</button></div>`).join("")}</div>`:""}`;
 }
 
 /* ================= 设置 + 同步 ================= */
@@ -1100,6 +1163,17 @@ function vSet(){
     <label>主题</label><select id="set-theme"><option value="light" ${ST.settings.theme==="light"?"selected":""}>浅色</option>
       <option value="dark" ${ST.settings.theme==="dark"?"selected":""}>深色</option></select>
     <button class="btn sm" onclick="Settings.save()">保存</button></div></div>
+  <div class="card"><h2 style="font-size:14px">题库合并</h2>
+    <div class="row" style="margin-top:8px;flex-wrap:wrap;align-items:center">
+      <input type="file" id="imp-files" accept=".json,application/json" multiple style="display:none" onchange="Imports.addFiles(this.files);this.value=''">
+      <button class="btn sm" onclick="document.getElementById('imp-files').click()">导入题库 JSON（可多选）</button>
+      <span class="muted" style="font-size:12px">与内置题库合并，刷题/组卷/考试/闪卡均可用；保留原始文件名。</span></div>
+    <div id="imp-list" style="margin-top:8px">
+    ${Imports.all().map((im,i)=>`<div class="row" style="margin:4px 0">
+      <span style="flex:1">${esc(im.name)}</span>
+      <span class="muted" style="font-size:12px">${im.count}题 · ${im.date}</span>
+      <button class="btn sm ghost" onclick="Imports.del(${i})">删除</button></div>`).join("")
+      ||'<span class="muted" style="font-size:12px">暂无导入资料</span>'}</div></div>
   <div class="card"><h2 style="font-size:14px">Supabase 同步 (可选)</h2>
     <div class="row" style="margin-top:8px">
       <input id="set-sburl" placeholder="https://xxx.supabase.co" value="${esc(ST.settings.supabaseUrl)}" style="flex:1;min-width:220px">
@@ -1295,12 +1369,13 @@ function vLib(){
   const books=(BANK.books||[]).map(b=>{ const tag=String(b.bankId||"").toUpperCase();
     const total=(b.source&&b.source.pages)||0; const read=Lib.readCount(tag);
     const pct=total?Math.round(read/total*100):0;
-    return {tag,title:b.title,subject:b.subject||"",total,read,pct,time:Lib.timeFmt(tag)}; });
+    return {tag,title:b.title,subject:b.subject||"",file:(b.source&&b.source.fileName)||"",total,read,pct,time:Lib.timeFmt(tag)}; });
   el.innerHTML=`<h2>资料库 <span class="muted" style="font-size:12px">教材页码进度 · 带页码摘录 · 源文件自检</span></h2>
   <div class="card"><h2 style="font-size:14px">教材</h2>
     <div id="lib-books" class="row" style="margin-top:6px">
     ${books.length?books.map(b=>`<div class="opt" style="width:auto;min-width:200px" onclick="Lib.open('${b.tag}')">
       <div class="row" style="justify-content:space-between"><b>${esc(b.title)}</b><span class="muted">${b.total}页</span></div>
+      ${b.file?`<div class="muted" style="font-size:11px;margin-top:2px">源文件: ${esc(b.file)}</div>`:""}
       <div class="bar" style="margin:6px 0"><i style="width:${b.pct}%"></i></div>
       <div class="muted" style="font-size:11px">已读 ${b.read}页 · ${b.pct}% · 阅读 ${b.time}</div></div>`).join("")
       : '<span class="muted">题库未包含书籍信息(BANK.books 为空)</span>'}
@@ -1423,9 +1498,44 @@ function route(){
 }
 window.addEventListener("hashchange",route);
 
+/* ================= 题库合并 (运行时导入, 保留原始文件名) ================= */
+const Imports={
+  all(){ try{ return JSON.parse(localStorage.getItem("bk-imports")||"[]"); }catch(e){ return []; } },
+  _save(l){ try{ localStorage.setItem("bk-imports",JSON.stringify(l)); return true; }
+    catch(e){ toast("保存失败: 导入内容过大, 浏览器本地空间不足"); return false; } },
+  apply(){   // 启动时并入 BANK (id 加前缀防冲突), 之后 buildIndexes 全局生效
+    this.all().forEach((imp,ni)=>{
+      let b; try{ b=JSON.parse(imp.json); }catch(e){ return; }
+      const px="i"+ni+"_";
+      (b.chapters||[]).forEach(c=>BANK.chapters.push(Object.assign({},c,{id:px+c.id,
+        children:(c.children||[]).map(s=>Object.assign({},s,{id:px+s.id}))})));
+      (b.knowledgePoints||[]).forEach(k=>BANK.knowledgePoints.push(Object.assign({},k,
+        {id:px+k.id,chapterId:px+(k.chapterId||""),parentId:k.parentId?px+k.parentId:k.parentId})));
+      (b.questions||[]).forEach(q=>BANK.questions.push(Object.assign({},q,{id:px+q.id,chapterId:px+(q.chapterId||"")})));
+    });
+  },
+  addFiles(files){
+    const list=this.all(); let added=0;
+    const readNext=(arr,done)=>{ if(!arr.length){ done(); return; }
+      const f=arr.shift(); const r=new FileReader();
+      r.onload=()=>{ try{ const data=JSON.parse(r.result);
+          const n=(data.questions||[]).length;
+          if(!n){ toast(f.name+" 中无 questions, 已跳过"); }
+          else { list.push({name:f.name,date:new Date().toISOString().slice(0,10),count:n,json:r.result}); added++; }
+        }catch(e){ toast(f.name+" 解析失败, 已跳过"); }
+        readNext(arr,done); };
+      r.onerror=()=>{ toast(f.name+" 读取失败"); readNext(arr,done); };
+      r.readAsText(f); };
+    readNext([...files],()=>{ if(added&&this._save(list)){ toast("已导入 "+added+" 份资料, 正在合并…"); setTimeout(()=>location.reload(),600); } });
+  },
+  del(i){ const l=this.all(); l.splice(i,1);
+    if(this._save(l)){ toast("已删除"); setTimeout(()=>location.reload(),400); } }
+};
+
 /* ================= 启动 ================= */
 (async function(){
   await Store.init();
+  Imports.apply();
   buildIndexes();
   route();
 })();
