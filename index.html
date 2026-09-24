@@ -183,7 +183,7 @@ const Store={
   async saveAll(){ for(const k of SKEYS) await Store.save(k); }
 };
 function today(){ return new Date().toISOString().slice(0,10); }
-function dkey(){ const d=ST.daily[today()]||{b:0,ok:0,cards:0}; ST.daily[today()]=d; return d; }
+function dkey(){ const d=ST.daily[today()]||{b:0,ok:0,cards:0,h:Array(24).fill(0)}; if(!d.h) d.h=Array(24).fill(0); ST.daily[today()]=d; return d; }
 
 /* ================= 通用 UI ================= */
 const $=s=>document.querySelector(s);
@@ -341,7 +341,7 @@ Brush.pick=function(k){
   });
   p.a++; p.last=Date.now(); p.lastQ=id;
   if(right) p.c++; else { p.w++; p.mastered=false; }
-  const d=dkey(); d.b++; if(right)d.ok++;
+  const d=dkey(); d.b++; if(right)d.ok++; d.h[new Date().getHours()]++;
   ST.progress[id]=p; Store.save("progress"); Store.save("daily");
   Brush.reveal();
   Brush.clearAuto();
@@ -387,6 +387,7 @@ function vExam(){
   const el=$("#main");
   const rules=(BANK.examRules||[]).map(r=>`<div class="list-row"><div class="grow">
     <b>${esc(r.name)}</b> <span class="muted">${r.sections.map(s=>s.count+"题/"+s.scorePerQuestion+"分").join(" + ")} · ${r.durationMinutes}分钟 · 覆盖 ${esc((r.scopeBooks||[]).join("/"))}</span></div>
+    <button class="btn sm ghost" onclick='Exam.loadRule(${JSON.stringify(r.id)})'>载入修改</button>
     <button class="btn sm" onclick='Exam.begin(${JSON.stringify(r.id)})'>开考</button></div>`).join("");
   el.innerHTML=`<h2>模拟考试</h2>
   <div class="card">${rules||"<span class='muted'>题库暂无考试规则</span>"}
@@ -400,7 +401,7 @@ function vExam(){
   Exam.renderCustom();
 };
 /* ---- 自定义组卷表单（可视化, 免写 JSON） ---- */
-Exam.custom={name:"自定义模拟卷",duration:120,books:{a:true,b:true,c:true},
+Exam.custom={name:"自定义模拟卷",duration:120,books:{a:true,b:true,c:true},chapters:[],
   sections:[{type:"single_choice",count:60,scorePerQuestion:1,preferWrong:false}]};
 const TYPE_LABEL={single_choice:"单选题",multi_choice:"多选题",judge:"判断题",true_false:"判断题",fill:"填空题",case:"案例题",short_answer:"简答题"};
 Exam.typeOptions=function(sel){
@@ -408,9 +409,11 @@ Exam.typeOptions=function(sel){
   if(!set.size) set.add("single_choice");
   return [...set].map(t=>`<option value="${t}" ${t===sel?"selected":""}>${TYPE_LABEL[t]||t}</option>`).join("");
 };
-Exam.qPoolCount=function(books){
-  return allQ().filter(q=>q.stem&&q.options&&q.options.length>=2&&!q.incomplete&&q.answer&&q.answer.resolved)
-    .filter(q=>books.length&&books.some(b=>q.chapterId.startsWith(b))).length;
+Exam.qPoolCount=function(books,chapters){
+  let p=allQ().filter(q=>q.stem&&q.options&&q.options.length>=2&&!q.incomplete&&q.answer&&q.answer.resolved)
+    .filter(q=>books.length&&books.some(b=>q.chapterId.startsWith(b)));
+  if(chapters&&chapters.length) p=p.filter(q=>chapters.includes(q.chapterId));
+  return p.length;
 };
 Exam.renderCustom=function(){
   const box=$("#custom-form"); if(!box) return;
@@ -428,7 +431,12 @@ Exam.renderCustom=function(){
       <label>每题 <input type="number" min="0.5" step="0.5" value="${s.scorePerQuestion}" style="width:60px" oninput="Exam.custom.sections[${i}].scorePerQuestion=Math.max(0.5,+this.value||1);Exam.updateSummary()"> 分</label>
       <label class="muted"><input type="checkbox" ${s.preferWrong?"checked":""} onchange="Exam.custom.sections[${i}].preferWrong=this.checked;Exam.updateSummary()"> 只抽错题</label>
       <button class="btn sm ghost" onclick="Exam.delSec(${i})">删除</button></div>`).join("")}
-    <div class="row" style="margin-top:8px"><button class="btn sm" onclick="Exam.addSec()">＋ 添加题型段落</button></div>`;
+    <div class="row" style="margin-top:8px"><button class="btn sm" onclick="Exam.addSec()">＋ 添加题型段落</button></div>
+    <div class="row" style="margin-top:10px;align-items:center">
+      <b class="muted" style="font-size:12px">章节范围：</b>
+      <span id="ch-scope-label" class="muted">全部章节</span>
+      <button class="btn sm ghost" onclick="Exam.toggleChPicker()">选择章节</button></div>
+    <div id="chapter-picker" style="display:none;border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:8px;margin-top:6px;max-height:260px;overflow:auto"></div>`;
   this.updateSummary();
 };
 Exam.addSec=function(){
@@ -441,36 +449,97 @@ Exam.delSec=function(i){
   if(!this.custom.sections.length) this.custom.sections.push({type:"single_choice",count:20,scorePerQuestion:1,preferWrong:false});
   this.renderCustom();
 };
+Exam.effBooks=function(){
+  const c=this.custom, chs=c.chapters||[];
+  if(chs.length) return [...new Set(chs.map(id=>(id[0]||"a").toLowerCase()))];
+  return Object.keys(c.books).filter(k=>c.books[k]);
+};
 Exam.updateSummary=function(){
   const c=this.custom, sum=$("#custom-summary"); if(!sum) return;
-  const books=Object.keys(c.books).filter(k=>c.books[k]);
+  const chs=c.chapters||[];
+  const books=this.effBooks();
   const total=c.sections.reduce((a,s)=>a+s.count*s.scorePerQuestion,0);
   const totalQ=c.sections.reduce((a,s)=>a+s.count,0);
-  const pool=this.qPoolCount(books);
+  const pool=this.qPoolCount(books,chs);
   const parts=[];
   parts.push(`总分 <b>${+total.toFixed(1)}</b> 分 · 共 <b>${totalQ}</b> 题 · 时长 ${c.duration} 分钟`);
   parts.push(books.length?`覆盖 ${books.map(b=>"书"+b.toUpperCase()).join("/")}`:`<span style="color:#c0392b">未选择任何书</span>`);
+  if(chs.length) parts.push(`章节 <b>${chs.length}</b> 节`);
   if(books.length) parts.push(`范围内可用 <b>${pool}</b> 题`);
   let warn="";
   if(books.length&&totalQ>pool) warn=` <span style="color:#c0392b">⚠ 抽题数超过可用题数, 请调小数量或扩大覆盖范围</span>`;
   sum.innerHTML=parts.join(" · ")+warn;
+  const lbl=$("#ch-scope-label"); if(lbl) lbl.textContent=chs.length?("已选 "+chs.length+" 节"):"全部章节";
   const ta=$("#rule-json"); if(ta) ta.value=JSON.stringify(this.buildCustomRule(),null,1);
 };
 Exam.buildCustomRule=function(){
   const c=this.custom;
-  const books=Object.keys(c.books).filter(k=>c.books[k]);
+  const books=this.effBooks();
+  const chs=(c.chapters&&c.chapters.length)?[...c.chapters]:undefined;
   const sections=c.sections.map(s=>({type:s.type,count:s.count,scorePerQuestion:s.scorePerQuestion,knowledgeWeight:{},difficultyDist:{},preferWrong:!!s.preferWrong}));
   const totalScore=sections.reduce((a,s)=>a+s.count*s.scorePerQuestion,0);
-  return {id:"rule-custom",name:c.name||"自定义模拟卷",totalScore:+totalScore.toFixed(1),durationMinutes:Math.max(1,c.duration|0),scopeBooks:books,coverage:"all",sections};
+  const rule={id:"rule-custom",name:c.name||"自定义模拟卷",totalScore:+totalScore.toFixed(1),durationMinutes:Math.max(1,c.duration|0),scopeBooks:books,coverage:"all",sections};
+  if(chs) rule.scopeChapters=chs;
+  return rule;
 };
 Exam.beginCustom=function(){
-  const c=this.custom;
-  const books=Object.keys(c.books).filter(k=>c.books[k]);
-  if(!books.length){ toast("请至少勾选一本书作为覆盖范围"); return; }
-  const pool=this.qPoolCount(books);
+  const c=this.custom, chs=c.chapters||[];
+  const books=this.effBooks();
+  if(!books.length){ toast("请至少勾选一本书或选择章节作为覆盖范围"); return; }
+  const pool=this.qPoolCount(books,chs);
   const totalQ=c.sections.reduce((a,s)=>a+s.count,0);
   if(totalQ>pool){ toast("抽题总数 "+totalQ+" 超过范围内可用题数 "+pool+", 请调整"); return; }
   this._run(this.buildCustomRule());
+};
+/* ---- 章节选择 & 预设规则载入 ---- */
+Exam.loadRule=function(id){
+  const r=(BANK.examRules||[]).find(x=>x.id===id); if(!r) return;
+  const books={a:false,b:false,c:false};
+  (r.scopeBooks||[]).forEach(b=>{ const k=(b||"")[0].toLowerCase(); if(k in books) books[k]=true; });
+  this.custom={name:r.name||"自定义模拟卷",duration:r.durationMinutes||120,books,chapters:[],
+    sections:(r.sections||[]).map(s=>({type:s.type||"single_choice",count:s.count||10,scorePerQuestion:s.scorePerQuestion||1,preferWrong:!!s.preferWrong}))};
+  if(!this.custom.sections.length) this.custom.sections=[{type:"single_choice",count:20,scorePerQuestion:1,preferWrong:false}];
+  this.renderCustom();
+  toast("已载入「"+(r.name||"规则")+"」, 修改后点「按此配置开考」");
+};
+Exam.toggleChPicker=function(){
+  const box=$("#chapter-picker"); if(!box) return;
+  const show=box.style.display==="none";
+  box.style.display=show?"block":"none";
+  if(show) this.renderChapterPicker();
+};
+Exam.qCountBySub=function(){
+  const m={};
+  allQ().forEach(q=>{ if(q.stem&&q.options&&q.options.length>=2&&!q.incomplete&&q.answer&&q.answer.resolved) m[q.chapterId]=(m[q.chapterId]||0)+1; });
+  return m;
+};
+Exam.renderChapterPicker=function(){
+  const box=$("#chapter-picker"); if(!box) return;
+  const openIds=[...box.querySelectorAll("details[open]")].map(d=>d.dataset.ch);
+  const sel=new Set(this.custom.chapters||[]);
+  const cnt=this.qCountBySub();
+  box.innerHTML=(BANK.chapters||[]).map(ch=>{
+    const subs=ch.children||[];
+    const allSel=subs.length&&subs.every(s=>sel.has(s.id));
+    const n=subs.reduce((a,s)=>a+(cnt[s.id]||0),0);
+    return `<details data-ch="${ch.id}" ${openIds.includes(ch.id)?"open":""}><summary style="cursor:pointer">
+      <label style="display:inline-flex;align-items:center;gap:4px"><input type="checkbox" ${allSel?"checked":""} onchange="Exam.toggleCh('${ch.id}',this.checked)">
+      <b style="font-size:12px">${esc(ch.title)}</b> <span class="muted">(${n}题)</span></label></summary>
+      <div style="margin:4px 0 4px 20px">${subs.map(s=>`<label style="display:inline-block;margin:2px 10px 2px 0;font-size:12px"><input type="checkbox" ${sel.has(s.id)?"checked":""} onchange="Exam.toggleSub('${s.id}',this.checked)"> ${esc(s.title)} <span class="muted">(${cnt[s.id]||0})</span></label>`).join("")||"<span class='muted'>无小节</span>"}</div></details>`;
+  }).join("")||"<span class='muted'>题库无章节信息</span>";
+};
+Exam.toggleCh=function(chId,on){
+  const ch=(BANK.chapters||[]).find(c=>c.id===chId); if(!ch) return;
+  const set=new Set(this.custom.chapters||[]);
+  (ch.children||[]).forEach(s=> on?set.add(s.id):set.delete(s.id));
+  this.custom.chapters=[...set];
+  this.renderChapterPicker(); this.updateSummary();
+};
+Exam.toggleSub=function(id,on){
+  const set=new Set(this.custom.chapters||[]);
+  on?set.add(id):set.delete(id);
+  this.custom.chapters=[...set];
+  this.updateSummary();
 };
 Exam.begin=function(id){
   const r=(BANK.examRules||[]).find(x=>x.id===id); if(r) this._run(r);
@@ -479,7 +548,8 @@ Exam._run=function(rule){
   const used=new Set(); const paper=[];
   for(const sec of rule.sections||[]){
     let pool=allQ().filter(q=>q.stem&&q.options.length>=2&&!q.incomplete)
-      .filter(q=>!rule.scopeBooks||rule.scopeBooks.some(b=>q.chapterId.startsWith(b.toLowerCase())));
+      .filter(q=>!rule.scopeBooks||rule.scopeBooks.some(b=>q.chapterId.startsWith(b.toLowerCase())))
+      .filter(q=>!rule.scopeChapters||!rule.scopeChapters.length||rule.scopeChapters.includes(q.chapterId));
     if(!sec.preferWrong) pool=pool.filter(q=>q.answer.resolved);   // 判分优先有答案题
     // 加权: 错题 x3, 未做 x2
     const weighted=[];
@@ -890,6 +960,23 @@ function vStats(){
   const days=[]; for(let i=6;i>=0;i--){ const dt=new Date(Date.now()-i*864e5).toISOString().slice(0,10);
     days.push([dt.slice(5),ST.daily[dt]||{b:0,ok:0,cards:0}]); }
   const maxB=Math.max(1,...days.map(d=>d[1].b));
+  // 24h 时段分布(自记录起, 旧数据无 h 字段按 0 计)
+  const hours=Array(24).fill(0);
+  for(const v of Object.values(ST.daily)){ const h=v.h||[]; for(let i=0;i<24;i++) hours[i]+=h[i]||0; }
+  const maxH=Math.max(1,...hours);
+  // 半年活跃热力(近26周, 档位按每日目标题数)
+  const target=+ST.settings.dailyBrush||50;
+  const pad2=n=>String(n).padStart(2,"0");
+  const fmtDay=dt=>dt.getFullYear()+"-"+pad2(dt.getMonth()+1)+"-"+pad2(dt.getDate());
+  const endD=new Date(); endD.setHours(0,0,0,0);
+  const startD0=new Date(endD.getTime()-181*864e5); const startD=new Date(startD0.getTime()-((startD0.getDay()+6)%7)*864e5);
+  const heat=[];
+  for(let dt=new Date(startD); dt<=endD; dt=new Date(dt.getTime()+864e5)){
+    const k=fmtDay(dt); const b=(ST.daily[k]||{}).b||0;
+    const lv=b===0?0:b<target*0.34?1:b<target*0.67?2:b<target?3:4;
+    const st=lv===0?"background:rgba(128,128,128,.18)":`background:var(--pri);opacity:${[0.3,0.55,0.8,1][lv-1]}`;
+    heat.push(`<i title="${k} · ${b}题" style="width:11px;height:11px;border-radius:2px;${st}"></i>`);
+  }
   // 章节 × 正确率
   const rows=Object.entries(IDX.ch).map(([cid,c])=>{
     const cq=qs.filter(q=>q.chapterId===cid||q.chapterId.startsWith(cid+"-"));
@@ -905,6 +992,15 @@ function vStats(){
   <div class="card"><h2 style="font-size:14px">近7天活跃</h2>
     <div class="row" style="align-items:flex-end;gap:14px;height:110px;margin-top:10px">
     ${days.map(([d,v])=>`<div style="text-align:center"><div style="width:30px;background:var(--pri);height:${Math.round(v.b/maxB*80)+2}px;border-radius:4px 4px 0 0" title="${v.b}题/${v.ok}对"></div><div class="muted" style="font-size:10px">${d}</div></div>`).join("")}</div></div>
+  <div class="card"><h2 style="font-size:14px">24小时时段分布</h2>
+    <div class="row" style="align-items:flex-end;gap:3px;height:70px;margin-top:10px">
+    ${hours.map((n,i)=>`<div style="text-align:center;flex:1" title="${i}:00–${i+1}:00 · ${n}题"><div style="background:var(--pri);height:${Math.round(n/maxH*44)+2}px;border-radius:3px 3px 0 0"></div><div class="muted" style="font-size:9px">${i%4===0?i:""}</div></div>`).join("")}</div>
+    <div class="muted" style="font-size:10px;margin-top:4px">自开始记录起各时段累计刷题量</div></div>
+  <div class="card"><h2 style="font-size:14px">半年活跃热力</h2>
+    <div style="display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,11px);gap:2px;margin-top:10px">${heat.join("")}</div>
+    <div class="row muted" style="font-size:10px;margin-top:8px;justify-content:flex-end;align-items:center;gap:3px">少
+      <i style="width:10px;height:10px;border-radius:2px;background:rgba(128,128,128,.18);display:inline-block"></i>${[0.3,0.55,0.8,1].map(o=>`<i style="width:10px;height:10px;border-radius:2px;background:var(--pri);opacity:${o};display:inline-block"></i>`).join("")}多
+      <span style="margin-left:6px">档位按每日目标 ${target} 题</span></div></div>
   <div class="card"><h2 style="font-size:14px">章节正确率热力</h2>
     <table style="margin-top:8px"><tr><th>章节</th><th>题量</th><th>已刷</th><th>正确率</th></tr>
     ${rows.sort((a,b)=>a[3]-b[3]).map(r=>`<tr><td>${esc(r[0])}</td><td>${r[1]}</td><td>${r[2]}</td>
