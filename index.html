@@ -221,8 +221,14 @@ function download(name,text,mime){
   a.download=name;a.click();
 }
 const _LOCAL=(location.protocol==="file:"||/^(localhost|127\.0\.0\.1)$/.test(location.hostname));
-function mediaSrc(m){ return (_LOCAL?"../":"")+String(m.src||"").replace(/\\/g,"/"); }   // 本地: app/ 相对项目根; 线上: 数据与站点同根
-function nextPageSrc(m){ return (_LOCAL?"../":"")+String(m.src||"").replace(/\\/g,"/").replace(/page_(\d+)\.png/,(x,d)=>"page_"+(+d+1)+".png"); }   // 答案/解析常在下一页
+// 线上: 原页整页 PNG 体积过大不部署, 映射到 WebP 压缩版 (data/raw_pages*/page_N.png -> data/raw_pages*_webp/page_N.webp)
+function pageImgSrc(s){
+  s=String(s||"").replace(/\\/g,"/");
+  if(_LOCAL) return "../"+s;
+  return s.replace(/^(data\/raw_pages(?:_B|_C)?)\/page_(\d+)\.png$/i,(m,a,n)=>a+"_webp/page_"+n+".webp");
+}
+function mediaSrc(m){ return pageImgSrc(m); }   // 本地: app/ 相对项目根; 线上: WebP 压缩版
+function nextPageSrc(m){ const s=String(m.src||"").replace(/\\/g,"/").replace(/page_(\d+)\.png/,(x,d)=>"page_"+(+d+1)+".png"); return pageImgSrc(s); }   // 答案/解析常在下一页
 const NAVS=[["home","首页","home"],["brush","刷题","brush"],["exam","模拟考试","exam"],
   ["cards","闪卡背诵","cards"],["tree","知识树","tree"],["lib","资料库","lib"],["wrong","错题本","wrong"],
   ["plan","学习计划","plan"],["proof","校对台","proof"],["stats","统计","stats"],["set","设置","set"]];
@@ -275,7 +281,7 @@ Brush.imgFail=function(el,label){   // 图片加载失败: 给出明确提示而
   d.style.cssText="margin:8px 0;font-size:12px;border:1px dashed rgba(128,128,128,.4);border-radius:8px;padding:8px";
   d.textContent=label+(_LOCAL
     ? "加载失败 — 本地 data 目录缺少该图片文件"
-    : "未在线上部署 — "+label.replace(/（.*?）/,"")+"整页原图体积过大(约760MB)未上传, 仅本地版可看; 题图(裁剪图)已部署。若题图也不显示, 请 Ctrl+F5 强制刷新清缓存");
+    : "未加载成功 — 请先 Ctrl+F5 强制刷新清缓存；若仍失败说明该图尚未部署到线上（原题页整页图需 WebP 压缩版部署后才能在线查看）");
   el.replaceWith(d); };
 Brush.clearAuto=function(){if(Brush.autoT){clearTimeout(Brush.autoT);Brush.autoT=null;}};
 function buildQueue(){
@@ -899,10 +905,11 @@ const Tree={
       const kidIds=this.chapterKids(cid);
       const kids=kidIds.map(kid=>Tree.node(kid,kw)).join("");
       const qn=allQ().filter(q=>q.chapterId===cid||q.chapterId.startsWith(cid+"-")).length;
+      const kn=Object.values(IDX.kp).filter(k=>k.chapterId===cid).length;
       const match=!kw||c.title.toLowerCase().includes(kw);
       if(kw&&!match&&!kids) return "";
       return `<div class="tree-node"><div class="lb" onclick="Tree.detail('${cid}')"><b>${esc(c.title)}</b>
-        <span class="muted" style="font-size:11px;margin-left:6px">${qn?qn+"题":""}${kids?"":" · 本章暂无知识点数据"}</span></div>
+        <span class="muted" style="font-size:11px;margin-left:6px">${[qn?qn+"题":"",kn?kn+"知识点":""].filter(Boolean).join(" · ")}${(!qn&&!kn&&!kids)?" · 暂无内容":""}</span></div>
         ${kids?'<div class="tree-kids">'+kids+"</div>":""}</div>`;
     }).join("");
     $("#tree-box").innerHTML=html||'<span class="muted">无匹配知识点</span>';
@@ -1325,7 +1332,7 @@ const Fish={
 /* ================= 资料库 (教材页码进度 + 带页码摘录 + 源文件自检) ================= */
 // 页图目录映射(与 pipeline.PAGE_DIRS 对齐)
 const LIB_PAGE_DIR = {A:"data/raw_pages", B:"data/raw_pages_B", C:"data/raw_pages_C"};
-function libPageSrc(tag, page){ return "../" + (LIB_PAGE_DIR[String(tag).toUpperCase()]||"data/raw_pages") + "/page_" + page + ".png"; }
+function libPageSrc(tag, page){ const p=(LIB_PAGE_DIR[String(tag).toUpperCase()]||"data/raw_pages")+"/page_"+page+".png"; return pageImgSrc(p); }
 const Lib = {
   book:null, page:1, total:0, timer:null, _bu:null, _vis:null,
   readCount(tag){ const r=ST.lib.read[tag]||{}; return Object.keys(r).filter(k=>r[k]).length; },
