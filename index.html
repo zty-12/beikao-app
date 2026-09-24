@@ -390,15 +390,87 @@ function vExam(){
     <button class="btn sm" onclick='Exam.begin(${JSON.stringify(r.id)})'>开考</button></div>`).join("");
   el.innerHTML=`<h2>模拟考试</h2>
   <div class="card">${rules||"<span class='muted'>题库暂无考试规则</span>"}
-  <div class="muted" style="margin-top:8px">规则可在题库 JSON 中编辑; 抽题 = 按规则数量在覆盖范围内加权随机(优先未做过、错题加权), 无答案题不判分。</div></div>
-  <div class="card"><h2 style="font-size:14px">自定义规则 (JSON)</h2>
-    <textarea id="rule-json" rows="7">${esc(JSON.stringify(BANK.examRules&&BANK.examRules[0]||{},null,1))}</textarea>
-    <div class="row" style="margin-top:8px"><button class="btn" onclick="Exam.beginCustom()">按此规则开考</button></div></div>
+  <div class="muted" style="margin-top:8px">抽题 = 按数量在覆盖范围内加权随机(优先未做过、错题加权), 无答案题不判分。</div></div>
+  <div class="card"><h2 style="font-size:14px">自定义组卷</h2><div id="custom-form"></div>
+    <div class="muted" id="custom-summary" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:10px"><button class="btn" onclick="Exam.beginCustom()">按此配置开考</button></div>
+    <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">高级：查看生成的规则 JSON（一般无需理会）</summary>
+      <textarea id="rule-json" rows="6" style="margin-top:6px" readonly></textarea></details></div>
   <div id="exam-area"></div>`;
-}
+  Exam.renderCustom();
+};
+/* ---- 自定义组卷表单（可视化, 免写 JSON） ---- */
+Exam.custom={name:"自定义模拟卷",duration:120,books:{a:true,b:true,c:true},
+  sections:[{type:"single_choice",count:60,scorePerQuestion:1,preferWrong:false}]};
+const TYPE_LABEL={single_choice:"单选题",multi_choice:"多选题",judge:"判断题",true_false:"判断题",fill:"填空题",case:"案例题",short_answer:"简答题"};
+Exam.typeOptions=function(sel){
+  const set=new Set((BANK.questions||[]).map(q=>q.type).filter(Boolean));
+  if(!set.size) set.add("single_choice");
+  return [...set].map(t=>`<option value="${t}" ${t===sel?"selected":""}>${TYPE_LABEL[t]||t}</option>`).join("");
+};
+Exam.qPoolCount=function(books){
+  return allQ().filter(q=>q.stem&&q.options&&q.options.length>=2&&!q.incomplete&&q.answer&&q.answer.resolved)
+    .filter(q=>books.length&&books.some(b=>q.chapterId.startsWith(b))).length;
+};
+Exam.renderCustom=function(){
+  const box=$("#custom-form"); if(!box) return;
+  const c=this.custom;
+  box.innerHTML=`
+    <div class="row" style="gap:14px;flex-wrap:wrap;margin-top:4px">
+      <label>卷名 <input type="text" value="${esc(c.name)}" style="width:150px" oninput="Exam.custom.name=this.value;Exam.updateSummary()"></label>
+      <label>时长 <input type="number" min="1" value="${c.duration}" style="width:64px" oninput="Exam.custom.duration=+this.value||1;Exam.updateSummary()"> 分钟</label>
+      <span>覆盖范围：</span>${["a","b","c"].map(b=>`<label><input type="checkbox" ${c.books[b]?"checked":""} onchange="Exam.custom.books['${b}']=this.checked;Exam.updateSummary()"> 书${b.toUpperCase()}</label>`).join(" ")}
+    </div>
+    ${c.sections.map((s,i)=>`<div class="row" style="gap:10px;flex-wrap:wrap;align-items:center;margin-top:8px">
+      <b class="muted" style="font-size:12px">段落${i+1}</b>
+      <select onchange="Exam.custom.sections[${i}].type=this.value;Exam.updateSummary()">${this.typeOptions(s.type)}</select>
+      <label>数量 <input type="number" min="1" value="${s.count}" style="width:60px" oninput="Exam.custom.sections[${i}].count=Math.max(1,+this.value||1);Exam.updateSummary()"> 题</label>
+      <label>每题 <input type="number" min="0.5" step="0.5" value="${s.scorePerQuestion}" style="width:60px" oninput="Exam.custom.sections[${i}].scorePerQuestion=Math.max(0.5,+this.value||1);Exam.updateSummary()"> 分</label>
+      <label class="muted"><input type="checkbox" ${s.preferWrong?"checked":""} onchange="Exam.custom.sections[${i}].preferWrong=this.checked;Exam.updateSummary()"> 只抽错题</label>
+      <button class="btn sm ghost" onclick="Exam.delSec(${i})">删除</button></div>`).join("")}
+    <div class="row" style="margin-top:8px"><button class="btn sm" onclick="Exam.addSec()">＋ 添加题型段落</button></div>`;
+  this.updateSummary();
+};
+Exam.addSec=function(){
+  const t=(BANK.questions||[]).map(q=>q.type).filter(Boolean);
+  this.custom.sections.push({type:t[0]||"single_choice",count:20,scorePerQuestion:1,preferWrong:false});
+  this.renderCustom();
+};
+Exam.delSec=function(i){
+  this.custom.sections.splice(i,1);
+  if(!this.custom.sections.length) this.custom.sections.push({type:"single_choice",count:20,scorePerQuestion:1,preferWrong:false});
+  this.renderCustom();
+};
+Exam.updateSummary=function(){
+  const c=this.custom, sum=$("#custom-summary"); if(!sum) return;
+  const books=Object.keys(c.books).filter(k=>c.books[k]);
+  const total=c.sections.reduce((a,s)=>a+s.count*s.scorePerQuestion,0);
+  const totalQ=c.sections.reduce((a,s)=>a+s.count,0);
+  const pool=this.qPoolCount(books);
+  const parts=[];
+  parts.push(`总分 <b>${+total.toFixed(1)}</b> 分 · 共 <b>${totalQ}</b> 题 · 时长 ${c.duration} 分钟`);
+  parts.push(books.length?`覆盖 ${books.map(b=>"书"+b.toUpperCase()).join("/")}`:`<span style="color:#c0392b">未选择任何书</span>`);
+  if(books.length) parts.push(`范围内可用 <b>${pool}</b> 题`);
+  let warn="";
+  if(books.length&&totalQ>pool) warn=` <span style="color:#c0392b">⚠ 抽题数超过可用题数, 请调小数量或扩大覆盖范围</span>`;
+  sum.innerHTML=parts.join(" · ")+warn;
+  const ta=$("#rule-json"); if(ta) ta.value=JSON.stringify(this.buildCustomRule(),null,1);
+};
+Exam.buildCustomRule=function(){
+  const c=this.custom;
+  const books=Object.keys(c.books).filter(k=>c.books[k]);
+  const sections=c.sections.map(s=>({type:s.type,count:s.count,scorePerQuestion:s.scorePerQuestion,knowledgeWeight:{},difficultyDist:{},preferWrong:!!s.preferWrong}));
+  const totalScore=sections.reduce((a,s)=>a+s.count*s.scorePerQuestion,0);
+  return {id:"rule-custom",name:c.name||"自定义模拟卷",totalScore:+totalScore.toFixed(1),durationMinutes:Math.max(1,c.duration|0),scopeBooks:books,coverage:"all",sections};
+};
 Exam.beginCustom=function(){
-  try{ const r=JSON.parse($("#rule-json").value); this._run(r); }
-  catch(e){ toast("规则 JSON 解析失败: "+e.message); }
+  const c=this.custom;
+  const books=Object.keys(c.books).filter(k=>c.books[k]);
+  if(!books.length){ toast("请至少勾选一本书作为覆盖范围"); return; }
+  const pool=this.qPoolCount(books);
+  const totalQ=c.sections.reduce((a,s)=>a+s.count,0);
+  if(totalQ>pool){ toast("抽题总数 "+totalQ+" 超过范围内可用题数 "+pool+", 请调整"); return; }
+  this._run(this.buildCustomRule());
 };
 Exam.begin=function(id){
   const r=(BANK.examRules||[]).find(x=>x.id===id); if(r) this._run(r);
