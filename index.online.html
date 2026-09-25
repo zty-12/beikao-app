@@ -269,7 +269,8 @@ const Sync={
   // 推送 payload: 含导入题库元数据
   pushPayload(){ const data={}; SKEYS.forEach(k=>data[k]=ST[k]); data.imports=Imports.all(); return data; }
 };
-function today(){ return new Date().toISOString().slice(0,10); }
+/* 统一按"本机时区"取日期(yyyy-mm-dd)。此前用 UTC(toISOString), 与 fmtD(本地)在 00:00-08:00 会差一天, 导致今日任务读不到当天安排。 */
+function today(){ return fmtD(new Date()); }
 function dkey(){ const d=ST.daily[today()]||{b:0,ok:0,cards:0,h:Array(24).fill(0)}; if(!d.h) d.h=Array(24).fill(0); ST.daily[today()]=d; return d; }
 
 /* ================= 通用 UI ================= */
@@ -630,9 +631,13 @@ function vExam(){
     <div class="row" style="margin-top:10px"><button class="btn" onclick="Exam.beginCustom()">按此配置开考</button></div>
     <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">高级：查看生成的规则 JSON（一般无需理会）</summary>
       <textarea id="rule-json" rows="6" style="margin-top:6px" readonly></textarea></details></div>
-  <div id="exam-area"></div>`;
+  <div id="exam-area"></div>
+  <div class="card"><h2 style="font-size:14px">历史考试报告 <span class="muted" style="font-size:11px">(可逐条删除, 或一键清理测试记录)</span></h2>
+    <div id="exam-reports"></div>
+    <div class="row" style="margin-top:8px"><button class="btn sm ghost" onclick="Exam.cleanTestReports()">清理测试/无效记录</button></div></div>`;
   Exam.renderCustom();
   Exam.renderTemplates();
+  Exam.renderReports();
 };
 /* ---- 自定义组卷表单（可视化, 免写 JSON） ---- */
 Exam.custom={name:"自定义模拟卷",duration:120,books:null,chapters:[],   // books:null = 全选, 渲染时按真实书目展开
@@ -896,8 +901,16 @@ Exam.saveTemplate=function(){
     seedPolicy:policy,seed,
     custom:JSON.parse(JSON.stringify({name:c.name,duration:c.duration,books:c.books,chapters:c.chapters,sections:c.sections}))};
   ST.examTemplates=ST.examTemplates||[];
-  ST.examTemplates.push(t); Store.save("examTemplates"); vExam();
-  toast("已保存模板「"+name+"」"+(policy==="fixed"?(" (固定种子 "+seed+", 每次同一套)"):" (每次随机抽题)"));
+  ST.examTemplates.push(t); Store.save("examTemplates");
+  this.resetCustom(); vExam();   // 保存后自动清空组卷表单, 避免同一份内容被反复保存/叠加
+  toast("已保存模板「"+name+"」"+(policy==="fixed"?(" (固定种子 "+seed+", 每次同一套)"):" (每次随机抽题)")+" · 组卷表单已清空");
+};
+/* 组卷表单复位: 清空覆盖范围/章节与所有段落, 回到一张空白默认卷 */
+Exam.resetCustom=function(){
+  const dur=(this.custom&&this.custom.duration)||120;
+  const types=(BANK.questions||[]).map(q=>q.type).filter(Boolean);
+  this.custom={name:"自定义模拟卷",duration:dur,books:null,chapters:[],
+    sections:[{type:types[0]||"single_choice",count:60,scorePerQuestion:1,preferWrong:false,chapterIds:[]}]};
 };
 Exam.renderTemplates=function(){
   const box=$("#exam-templates"); if(!box) return;
@@ -977,8 +990,36 @@ Exam.cancel=function(){
 };
 Exam.delReport=function(i){
   if(!ST.exams[i]) return;
-  if(!confirm("删除这条考试报告? (已入错题本的记录不受影响)")) return;
-  ST.exams.splice(i,1); Store.save("exams"); vStats();
+  const nm=ST.exams[i].name||"未命名";
+  if(!confirm("删除这条考试报告? (已入错题本的记录不受影响)\n"+nm)) return;
+  ST.exams.splice(i,1); Store.save("exams");
+  const h=location.hash||"";
+  if(h==="#exam") vExam(); else if(h==="#stats") vStats(); else if(h==="#home"&&typeof route==="function") route();
+  toast("已删除报告「"+nm+"」");
+};
+/* 按时间戳定位删除(用于刚交卷的报告卡, 避免索引错位) */
+Exam.delReportBy=function(date){ const i=(ST.exams||[]).findIndex(e=>e.date===date); if(i>=0) this.delReport(i); else toast("该报告已删除"); };
+Exam.cleanTestReports=function(){
+  const idx=[]; (ST.exams||[]).forEach((e,i)=>{
+    const n=String(e.name||"");
+    if(/测试|试用|test|demo/i.test(n)||+(e.total||0)===0) idx.push(i); });
+  if(!idx.length){ toast("没有需要清理的测试记录"); return; }
+  if(!confirm("将删除 "+idx.length+" 条测试/无效报告, 确认?")) return;
+  ST.exams=ST.exams.filter((e,i)=>!idx.includes(i)); Store.save("exams");
+  const h=location.hash||"";
+  if(h==="#exam") vExam(); else if(h==="#stats") vStats();
+  toast("已清理 "+idx.length+" 条测试报告");
+};
+Exam.renderReports=function(){
+  const box=$("#exam-reports"); if(!box) return;
+  const es=ST.exams||[];
+  if(!es.length){ box.innerHTML='<div class="muted" style="font-size:12px">暂无历史报告。交卷后自动生成, 可在此逐条删除。</div>'; return; }
+  box.innerHTML=`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">
+    <tr style="color:var(--tx2)"><th style="text-align:left;padding:4px 6px">时间</th><th style="text-align:left">卷名</th><th>得分</th><th>正确率</th><th>错题</th><th></th></tr>
+    ${es.map((e,i)=>`<tr><td style="padding:4px 6px;white-space:nowrap">${esc(String(e.date||"").slice(0,16).replace("T"," "))}</td>
+      <td>${esc(e.name||"未命名")}</td><td style="text-align:center">${e.score}/${e.total}</td>
+      <td style="text-align:center">${e.acc}%</td><td style="text-align:center">${(e.wrongIds||[]).length}</td>
+      <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost" onclick="Exam.delReport(${i})">删除</button></td></tr>`).join("")}</table></div>`;
 };
 Exam.toggleFlag=function(){ const id=this.paper.flatMap(s=>s.qs)[this.cur]; this.flags[id]=!this.flags[id]; this.draw(); };
 Exam.go=function(i){ const n=this.paper.flatMap(s=>s.qs).length; this.cur=Math.max(0,Math.min(n-1,i)); this.draw(); };
@@ -1012,7 +1053,8 @@ Exam.submit=function(){
       <span class="muted">${v.ok}/${v.n}</span></div>`).join("")}
     <div class="row" style="margin-top:12px">
       <button class="btn" onclick="location.hash='#wrong'">去错题本</button>
-      <button class="btn ghost" onclick="location.hash='#exam'">再考一次</button></div></div>`;
+      <button class="btn ghost" onclick="location.hash='#exam'">再考一次</button>
+      <button class="btn sm ghost" onclick="Exam.delReportBy('${rec.date}')">删除这份报告</button></div></div>`;
   renderMath($("#exam-area"));
   toast("已交卷, 错题已入错题本");
 };
@@ -1421,7 +1463,7 @@ function isHoliday(dt){
   return null;
 }
 /* 指定日期的每日目标刷题量 (供层级计划/任务落位/校准复用; 今天之外的天不做"剩余题量"上限) */
-function dayTargetFor(dt){
+function dayTargetFor(dt,noHoliday){
   const s=ST.settings;
   const examD=s.examDate?new Date(s.examDate+"T00:00:00"):null;
   const days=examD?Math.max(0,Math.ceil((examD-new Date(dt+"T00:00:00"))/864e5)):null;
@@ -1429,9 +1471,9 @@ function dayTargetFor(dt){
   const mins=wknd?(+s.weekendMin||240):(+s.weekdayMin||90);
   let brush=Math.max(5,Math.round(mins/2.2));
   if(days!==null&&days<=14) brush=0;                 // 冲刺期: 模考+错题为主
-  const hd=isHoliday(dt);
+  const hd=noHoliday?null:isHoliday(dt);
   if(hd&&brush>0) brush=Math.max(3,Math.round(brush*(hd.intensity||0.4)));
-  return {brush,wknd,holiday:hd,sprint:days!==null&&days<=14,days};
+  return {brush,wknd,holiday:isHoliday(dt),sprint:days!==null&&days<=14,days};
 }
 function planCompute(){
   const days=ST.settings.examDate? Math.max(0,Math.ceil((new Date(ST.settings.examDate)-Date.now())/864e5)):null;
@@ -1440,12 +1482,15 @@ function planCompute(){
   const unseen=studyQs.filter(q=>prog(q.id).a===0).length;
   // 近3天完成率 -> 调节系数
   let factor=1; const hist=[];
-  for(let i=1;i<=3;i++){ const dt=new Date(Date.now()-i*864e5).toISOString().slice(0,10); const d=ST.daily[dt]; if(d)hist.push(d.b>=(ST.settings.dailyBrush||50)*0.8); }
+  for(let i=1;i<=3;i++){ const dt=fmtD(new Date(Date.now()-i*864e5)); const d=ST.daily[dt]; if(d)hist.push(d.b>=(ST.settings.dailyBrush||50)*0.8); }
   if(hist.length>=2){ const r=hist.filter(Boolean).length/hist.length; factor=r>=0.9?1.2:r>=0.5?1:0.8; }
   const sprint=days!==null&&days<=14;
   // 当日目标: 工作日/周末/假期统一由 dayTargetFor 折算, 再按剩余题量封顶
+  // 注意: 先用"未扣假期"的基准做封顶, 再统一施加一次假期系数 —— 否则剩余题量的上限会把假期降额盖掉
+  const tgtRaw=dayTargetFor(today(),1);
   const tgt=dayTargetFor(today());
-  let brush=tgt.brush?Math.min(200,Math.max(10,Math.min(tgt.brush,Math.ceil(unseen/Math.max(days||30,1)*factor)))):0;
+  let brush=tgtRaw.brush?Math.min(200,Math.max(10,Math.min(tgtRaw.brush,Math.ceil(unseen/Math.max(days||30,1)*factor)))):0;
+  if(tgt.holiday&&brush>0) brush=Math.max(3,Math.round(brush*(tgt.holiday.intensity||0.4)));
   const due=dueCards().length;
   return {days,unseen,factor,sprint,brush,due,wknd:tgt.wknd,holiday:tgt.holiday};
 }
@@ -2030,7 +2075,7 @@ function mergeHolidayDays(days){
   const out=[];
   for(const d of off){
     const last=out[out.length-1];
-    const nxt=last?new Date(new Date(last.end+"T00:00:00").getTime()+864e5).toISOString().slice(0,10):null;
+    const nxt=last?fmtD(new Date(new Date(last.end+"T00:00:00").getTime()+864e5)):null;
     if(last&&last.name===d.name&&last.end===nxt) last.end=d.date;
     else out.push({name:d.name,start:d.date,end:d.date});
   }
@@ -2269,7 +2314,7 @@ function vStats(){
   const tgt=+ST.settings.targetAcc||0;
   const lastEx=ST.exams[0]||null;
   // 近7天
-  const days=[]; for(let i=6;i>=0;i--){ const dt=new Date(Date.now()-i*864e5).toISOString().slice(0,10);
+  const days=[]; for(let i=6;i>=0;i--){ const dt=fmtD(new Date(Date.now()-i*864e5));
     days.push([dt.slice(5),ST.daily[dt]||{b:0,ok:0,cards:0}]); }
   const maxB=Math.max(1,...days.map(d=>d[1].b));
   // 24h 时段分布(自记录起, 旧数据无 h 字段按 0 计)
@@ -2296,7 +2341,7 @@ function vStats(){
   const lvTot=Math.max(1,lv.mst+lv.fam+lv.weak+lv.none);
   // 正确率趋势(近30天) / 按科目正确率 / 模考 vs 目标差距 —— 图表数据
   const _tN=30,_tW=600,_tH=160,_tPL=34,_tPR=12,_tPT=14,_tPB=22;
-  const _td=[]; for(let i=_tN-1;i>=0;i--){ const dt=new Date(Date.now()-i*864e5).toISOString().slice(0,10);
+  const _td=[]; for(let i=_tN-1;i>=0;i--){ const dt=fmtD(new Date(Date.now()-i*864e5));
     const v=ST.daily[dt]; _td.push({dt,acc:(v&&v.b)?v.ok/v.b*100:null,b:v?v.b:0}); }
   const _X=i=>_tPL+(_tW-_tPL-_tPR)*i/(_tN-1);
   const _Y=a=>_tPT+(_tH-_tPT-_tPB)*(1-a/100);
@@ -2306,15 +2351,15 @@ function vStats(){
   const _tgrid=[0,50,100].map(g=>`<line x1="${_tPL}" y1="${_Y(g)}" x2="${_tW-_tPR}" y2="${_Y(g)}" stroke="rgba(128,128,128,.2)"/><text x="${_tPL-4}" y="${(_Y(g)+3)}" text-anchor="end" font-size="9" fill="#888">${g}</text>`).join("");
   const _tline=tgt?`<line x1="${_tPL}" y1="${_Y(tgt)}" x2="${_tW-_tPR}" y2="${_Y(tgt)}" stroke="#c0392b" stroke-dasharray="4 3"/><text x="${_tW-_tPR}" y="${(_Y(tgt)-3).toFixed(1)}" text-anchor="end" font-size="10" fill="#c0392b">目标 ${tgt}%</text>`:"";
   const _trendSVG=`<svg viewBox="0 0 ${_tW} ${_tH}" style="width:100%;max-width:600px;height:auto;color:var(--fg)">${_tgrid}<path d="${_poly}" fill="none" stroke="var(--pri)" stroke-width="2"/>${_dots}${_tline}<text x="${_tPL}" y="${_tH-6}" font-size="9" fill="#888">${_td[0].dt.slice(5)}</text><text x="${_tW-_tPR}" y="${_tH-6}" text-anchor="end" font-size="9" fill="#888">${_td[_tN-1].dt.slice(5)}</text></svg>`;
-  const _sb=[]; for(const q of qs){ const m=bookOfCh(q.chapterId); const t=m?m.title:"未归类";
-    let s=_sb.find(x=>x.t===t); if(!s){ s={t,n:0,d:0,ok:0}; _sb.push(s); } s.n++; const p=prog(q.id);
-    if(p.a){ s.d++; if(p.c>p.w) s.ok++; } }
-  const _sbArr=_sb.map(s=>({t:s.t,n:s.n,d:s.d,acc:s.d?s.ok/s.d*100:0})).sort((a,b)=>a.acc-b.acc);
+  // 按考纲科目统计正确率(科目 = 考纲17科, 题库章节已映射到科目; 资料/书维度见下方「按资料统计」)
+  const _sbArr=Plan.subjects().filter(s=>s.qTotal>0)
+    .map(s=>({t:s.title,n:s.qTotal,d:s.qDone,acc:s.qDone?s.qAcc:0,cid:(s.chapters||[])[0]||""}))
+    .sort((a,b)=>a.acc-b.acc);
   const _sbH=Math.max(40,_sbArr.length*22);
   const _sbSVG=`<svg viewBox="0 0 620 ${_sbH}" style="width:100%;max-width:620px;height:auto;color:var(--fg)">${_sbArr.map((s,i)=>{const col=s.acc>=70?"var(--ok)":s.acc>=40?"var(--warn)":"var(--bad)";
-    return `<g transform="translate(0,${i*22})"><text x="0" y="14" font-size="11" fill="currentColor">${esc(s.t.slice(0,14))}</text>
-      <rect x="150" y="2" width="400" height="15" rx="3" fill="rgba(128,128,128,.15)"/>
-      <rect x="150" y="2" width="${Math.max(2,400*s.acc/100)}" height="15" rx="3" fill="${col}"/>
+    return `<g transform="translate(0,${i*22})"><text x="0" y="14" font-size="11" fill="currentColor">${esc(s.t.slice(0,15))}</text>
+      <rect x="170" y="2" width="380" height="15" rx="3" fill="rgba(128,128,128,.15)"/>
+      <rect x="170" y="2" width="${Math.max(2,380*s.acc/100)}" height="15" rx="3" fill="${col}"/>
       <text x="560" y="14" font-size="10" fill="#555" text-anchor="end">${s.acc?Math.round(s.acc)+"%":"—"} (${s.d}/${s.n})</text></g>`;}).join("")}</svg>`;
   const _exs=ST.exams.slice(0,12), _exN=_exs.length;
   const _avg=_exN?Math.round(_exs.reduce((s,e)=>s+e.acc,0)/_exN):0;
@@ -2359,9 +2404,9 @@ function vStats(){
   <div class="card"><h2 style="font-size:14px">正确率趋势（近30天）</h2>
     ${_trendSVG}
     <div class="muted" style="font-size:10px;margin-top:4px">每日正确率 = 当日答对/当日做题；无做题日不连线。</div></div>
-  <div class="card"><h2 style="font-size:14px">按科目正确率 <span class="muted" style="font-weight:400">（科目=资料/书）</span></h2>
+  <div class="card"><h2 style="font-size:14px">按科目正确率 <span class="muted" style="font-weight:400">（科目=考纲17科 · 题库章节已映射, 不再按资料/书合并）</span></h2>
     ${_sbSVG}
-    <div class="muted" style="font-size:10px;margin-top:4px">条形长度=正确率，括号内=已刷/题量。</div></div>
+    <div class="muted" style="font-size:10px;margin-top:4px">条形长度=正确率，括号内=已刷/题量；未刷过的科目显示为 —。</div></div>
   ${weak.length?`<div class="card"><h2 style="font-size:14px">薄弱章节 TOP${weak.length} <span class="muted" style="font-weight:400">已刷≥3题 · 正确率升序</span></h2>
     <table style="margin-top:8px"><tr><th>章节</th><th>已刷/题量</th><th>正确率</th><th style="width:130px"></th></tr>
     ${weak.map(r=>`<tr><td>${esc(r.title)}</td><td class="muted">${r.d}/${r.n}</td>
@@ -2890,7 +2935,7 @@ const Imports={
       r.onload=()=>{ try{ const data=JSON.parse(r.result);
           const nq=(data.questions||[]).length, nk=(data.knowledgePoints||[]).length, nc=(data.chapters||[]).length;
           if(!nq&&!nk){ toast(f.name+" 中无 questions/knowledgePoints, 已跳过"); }
-          else { list.push({name:f.name,date:new Date().toISOString().slice(0,10),
+          else { list.push({name:f.name,date:fmtD(new Date()),
               kind:nk?"kp":"q",nc,nq,nk,json:r.result}); added++; }
         }catch(e){ toast(f.name+" 解析失败, 已跳过"); }
         readNext(arr,done); };
@@ -2952,7 +2997,7 @@ const Pass={
 /* 近 7 天完成率 / 正确率 / 闪卡 / 模考 → 给出下周动态调整建议 */
 const WeeklyReview={
   compute(){
-    const days=[]; for(let i=6;i>=0;i--){ const dt=new Date(Date.now()-i*864e5).toISOString().slice(0,10);
+    const days=[]; for(let i=6;i>=0;i--){ const dt=fmtD(new Date(Date.now()-i*864e5));
       days.push({dt,d:ST.daily[dt]||{b:0,ok:0,cards:0}}); }
     const target=+ST.settings.dailyBrush||50;
     const studied=days.filter(x=>x.d.b>0).length;
