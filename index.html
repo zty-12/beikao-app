@@ -196,7 +196,7 @@ function bookOfCh(cid){ if(!cid) return null;
 
 /* ================= 本地存储 (IndexedDB + localStorage 兜底) ================= */
 const ST = {progress:{}, srs:{}, settings:{examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,
-  weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,targetScore:132,subjMigrated:false,
+  weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,targetScore:132,subjMigrated:false,learnRatio:{base:60,mid:40,sprint:15},
   supabaseUrl:"",supabaseKey:""}, plan:{}, exams:[], examTemplates:[], holidays:[], syllabus:[], taskDays:{}, holidayCache:{},
   overrides:{}, daily:{}, lib:{read:{},time:{},excerpts:[]}};
 const SKEYS=["progress","srs","settings","plan","exams","overrides","daily","lib","videos","aiPlan",
@@ -218,7 +218,7 @@ const Store={
       })));
     }catch(e){ Store.db=null; SKEYS.forEach(k=>{_mem[k]=localStorage.getItem("bk_"+k);}); }
     SKEYS.forEach(k=>{ if(_mem[k]) try{ST[k]=JSON.parse(_mem[k]);}catch(_){} });
-    ST.settings=Object.assign({examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,targetScore:132,subjMigrated:false,supabaseUrl:"",supabaseKey:""},ST.settings);
+    ST.settings=Object.assign({examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,targetScore:132,subjMigrated:false,learnRatio:{base:60,mid:40,sprint:15},supabaseUrl:"",supabaseKey:""},ST.settings);
   },
   db:null,
   async save(k){
@@ -463,7 +463,8 @@ function buildQueue(){
   const f=Brush.f; let qs=allQ().filter(q=>q.stem&&q.options&&q.options.length>=2&&!q.incomplete);
   if(!(f.scope==="dup")) qs=qs.filter(q=>!q.duplicateOf);
   if(f.book) qs=qs.filter(q=>q.chapterId.startsWith(f.book.toLowerCase()));
-  if(f.ch) qs=qs.filter(q=>q.chapterId===f.ch||q.chapterId.startsWith(f.ch+"-")||chapPath(q.chapterId).includes(f.ch));
+  if(f.ch){ const arr=Array.isArray(f.ch)?f.ch:[f.ch];      // P6: 支持多章节数组(本周范围定向刷题)
+    qs=qs.filter(q=>arr.some(c=>q.chapterId===c||q.chapterId.startsWith(c+"-")||chapPath(q.chapterId).includes(c))); }
   if(f.scope==="unseen") qs=qs.filter(q=>prog(q.id).a===0);
   if(f.scope==="wrong") qs=qs.filter(q=>prog(q.id).w>0&&!prog(q.id).mastered);
   if(f.scope==="flag") qs=qs.filter(q=>prog(q.id).flag);
@@ -503,6 +504,18 @@ Brush.start=function(){
   buildQueue();
   if(!Brush.queue.length){ $("#brush-area").innerHTML='<div class="card">当前筛选没有题目。</div>'; return; }
   drawQ();
+};
+/* P6: 按今日任务所属周的范围定向刷题 (学完即练) */
+Brush.startWeek=function(){
+  const td=(ST.taskDays||{})[today()];
+  if(!td||!(td.chapters||[]).length){ if(!Brush.queue.length){ location.hash="#brush"; } return; }
+  Brush.f={book:"",ch:td.chapters.slice(),mode:"seq",scope:"unseen",n:Math.max(10,+td.brush||20)};
+  if(ST.settings.bankFilter){ ST.settings.bankFilter=""; Store.save("settings"); }
+  buildQueue(); location.hash="#brush";
+  setTimeout(()=>{ const a=$("#brush-area");
+    if(a) a.innerHTML=`<div class="card"><b>本周范围定向刷题</b> <span class="muted">${td.targets?esc(td.targets.map(t=>t.title).join("、")):""}</span>
+      ${Brush.queue.length?"":"<div class='muted' style='margin-top:6px'>本周范围里未做过的新题已刷完, 可切「全部」范围重刷。</div>"}</div>`+(Brush.queue.length?"":"");
+    if(Brush.queue.length) drawQ(); },80);
 };
 function drawQ(){
   const id=Brush.queue[Brush.pos]; const q=Q(id); const p=prog(id);
@@ -1506,13 +1519,26 @@ function renderPlanMini(box){
     ...(p.days!==null?[]:[["设置考试日期",false,"set"]])
   ];
   const done=tasks.filter(t=>t[1]).length;
+  const les=(td&&td.lessons)||[];                       // P6: 今日跟课清单
+  const tg=(td&&td.targets)||[];
+  const lesHTML=les.length?`<div class="checkline"><input type="checkbox" disabled>
+    <span class="grow"><b>📺 跟课</b> <span class="muted" style="font-size:12px">(先学再练 · 占今日约 ${td.ratio||50}%)</span><br>
+    ${les.map(v=>`<span class="tag" style="margin:3px 4px 0 0;cursor:pointer" onclick="Plan.openVid('${v.vid}')"
+      title="点击跳转播放: ${esc(v.title||"")}">${esc((v.title||"视频").slice(0,16))} ${v.pct||0}%</span>`).join("")}</span>
+    <a href="#lib" style="color:var(--pri);font-size:12px">资料库</a></div>`:"";
+  const tgtHTML=tg.length?`<div class="checkline"><input type="checkbox" disabled>
+    <span class="grow"><b>🎯 本周目标</b> <span class="muted" style="font-size:12px">${td?esc(td.week||""):""}${td&&td.phase?" · "+esc(td.phase):""}</span><br>
+    <span style="font-size:12.5px">${tg.map(x=>esc(x.title)).join("、")}</span>
+    ${(td&&td.kps&&td.kps.length)?`<div class="muted" style="font-size:11.5px;margin-top:2px">知识点: ${esc((td.kps||[]).slice(0,6).join("、"))}${(td.kps||[]).length>6?" 等":""}</div>`:""}</span>
+    <span style="font-size:12px;white-space:nowrap"><a href="javascript:Brush.startWeek()" style="color:var(--pri)">定向开刷</a></span></div>`:"";
   box.innerHTML=`<div class="row">${p.days!==null?`<div class="ring" style="--p:${tasks.length?done/tasks.length*100:0}"><i>${p.days}天</i></div>`:""}
-  <div class="grow">${tasks.map((t,i)=>`<div class="checkline"><input type="checkbox" ${t[1]?"checked":""} disabled>
+  <div class="grow">${p.sprint?"":lesHTML}${p.sprint?"":tgtHTML}${tasks.map((t,i)=>`<div class="checkline"><input type="checkbox" ${t[1]?"checked":""} disabled>
     <span class="grow" style="${t[1]?"text-decoration:line-through;color:var(--tx2)":""}">${t[0]}</span>
     <a href="#${t[2]}" style="color:var(--pri);font-size:12px">去完成</a></div>`).join("")}</div></div>
   ${p.sprint?'<div class="tag warn" style="margin-top:8px">冲刺模式: 距考试 ≤14 天, 只刷模考+错题+到期卡</div>':""}
   ${p.holiday?`<div class="tag" style="margin-top:6px;background:rgba(155,89,182,.15);color:#8e44ad">假期模式: ${esc(p.holiday.start)}~${esc(p.holiday.end)} 强度降至 ${Math.round((p.holiday.intensity||0.4)*100)}%</div>`:""}
-  ${p.factor!==1?`<div class="muted" style="margin-top:6px">自动调节: 近3天完成率${p.factor>1?"高, 配额已上浮 20%":"偏低, 配额已下调 20%"}</div>`:""}`;
+  ${p.factor!==1?`<div class="muted" style="margin-top:6px">自动调节: 近3天完成率${p.factor>1?"高, 配额已上浮 20%":"偏低, 配额已下调 20%"}</div>`:""}
+  ${(ST.plan&&ST.plan.generatedAt)?`<div class="muted" style="margin-top:6px;font-size:11.5px">生效计划来源: <b>${esc(ST.plan.source||"确定性引擎")}</b> · 生成于 ${esc(ST.plan.generatedAt)} · 每日任务与月周天结构均以该计划为准${ST.aiPlan&&ST.aiPlan.md?" (AI 计划仅作指导文档, 见下方⑥)":""}</div>`:""}`;
 }
 function vPlan(){
   const s=ST.settings;
@@ -1520,6 +1546,7 @@ function vPlan(){
   const brushW=Math.max(5,Math.round(wkMin/2.2)), brushE=Math.max(5,Math.round(weMin/2.2));
   const newW=Math.max(0,Math.round(wkMin/6)), newE=Math.max(0,Math.round(weMin/6));
   const isPreset=["注册环保工程师·基础考试","注册环保工程师·专业考试"].includes(s.examName);
+  const lr=Object.assign({base:60,mid:40,sprint:15},s.learnRatio||{});
   $("#main").innerHTML=`<h2>学习计划</h2>
 
   <div class="card"><h2 style="font-size:14px">① 考试信息</h2>
@@ -1543,6 +1570,15 @@ function vPlan(){
       <span class="tag">每周合计 ${wkMin*5+weMin*2} 分钟</span>
     </div>
     <div class="muted" style="margin-top:6px">按约 2.2 分钟/题、6 分钟/新卡 折算 → 工作日约 <b>${brushW} 题 + ${newW} 新卡</b> / 天；周末约 <b>${brushE} 题 + ${newE} 新卡</b> / 天。③ 中可调整各科目权重微调分配。</div>
+    <div class="row" style="margin-top:10px;flex-wrap:wrap;align-items:center">
+      <label>每天先听讲后做题, 听课占比:</label>
+      <label class="muted">基础期</label><input type="number" id="r-base" value="${lr.base}" min="0" max="90" style="width:56px" title="每天学习时间里分配给看课的比例">
+      <label class="muted">强化期</label><input type="number" id="r-mid" value="${lr.mid}" min="0" max="90" style="width:56px">
+      <label class="muted">冲刺期</label><input type="number" id="r-sprint" value="${lr.sprint}" min="0" max="90" style="width:56px">
+      <label class="muted">%</label>
+      <button class="btn sm" onclick="Plan.saveRatio()">保存节奏</button>
+      <span class="muted" style="font-size:11.5px">当天有课的科目按占比切时间给视频/教材, 剩余时间做该范围的检验题; 无课时 100% 用于做题。</span>
+    </div>
   </div>
 
   <div class="card"><h2 style="font-size:14px">③ 科目与范围 <span class="muted" style="font-size:11px">(考纲17科 · 类别/状态/考纲题量可手改, 放弃的科目退出计划与今日任务)</span></h2>
@@ -1551,6 +1587,7 @@ function vPlan(){
       <button class="btn sm ghost" onclick="Plan.toggleSyllabusImport()">导入考纲…</button>
       <button class="btn sm ghost" onclick="Plan.restoreSyllabus()">恢复内置考纲</button>
       <span class="muted" style="font-size:11.5px">· 内置注册环保基础考试考纲 17 科(公共基础11科120题×1分 + 专业基础6科60题×2分), 题库章节已自动映射</span>
+      <span class="muted" style="font-size:11.5px">· 📺 课程列 = 资料库中该科目的未看完/总视频数, 在「资料库」里给视频选章节即可自动归到对应科目</span>
     </div>
     <div id="syllabus-import-box" style="display:none;margin-top:8px;border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:8px">
       <textarea id="syllabus-import" rows="5" placeholder="每行一个科目, 如:&#10;数学基础 24&#10;1. 物理基础 12题&#10;我的自定义科目 30" style="width:100%"></textarea>
@@ -1558,7 +1595,7 @@ function vPlan(){
         <span class="muted" style="font-size:11.5px">名称与现有考纲科目匹配则更新题量, 否则新增为自定义科目(不关联题库章节)。</span></div>
     </div>
     <div style="overflow-x:auto;margin-top:6px"><table style="min-width:760px;width:100%;border-collapse:collapse;font-size:12.5px">
-      <thead><tr style="color:var(--tx2)"><th style="text-align:left;padding:4px 6px">科目</th><th>组</th><th>考纲题量</th><th>类别</th><th>状态</th><th>题库题</th><th>已刷</th><th>正确率</th><th>权重</th><th></th></tr></thead>
+      <thead><tr style="color:var(--tx2)"><th style="text-align:left;padding:4px 6px">科目</th><th>组</th><th>考纲题量</th><th>类别</th><th>状态</th><th>📺课程</th><th>题库题</th><th>已刷</th><th>正确率</th><th>权重</th><th></th></tr></thead>
       <tbody id="plan-subj-body">${Plan._subjRows()}</tbody>
     </table></div>
     <div class="muted" style="margin-top:6px">类别路由: 理解型→工作日主攻, 记忆型→周末背诵, 综合型→工作日原理+周末综合; 权重越高, 排程题量越多; 表格可左右滑动查看全部列。</div>
@@ -1585,12 +1622,24 @@ function vPlan(){
   <div class="card"><h2 style="font-size:14px">进度校准 <span class="muted" style="font-size:11px">(保大调小: 优先动天级任务赶月度目标, 实在不行才调整月计划)</span></h2>
     <div id="calib-out"></div></div>
 
-  <div class="card"><h2 style="font-size:14px">确定性规划 <span class="muted" style="font-size:11px">(离线可用 · 不依赖 AI)</span></h2>
+  <div class="card"><h2 style="font-size:14px">确定性规划 <span class="muted" style="font-size:11px">(离线可用 · 不依赖 AI · <b>当前生效</b>)</span></h2>
+    ${(()=>{ const p=ST.plan;
+      if(!p||!p.generatedAt) return '<div class="muted" style="margin-top:6px;font-size:12px">尚未生成计划。生成后这里显示生效来源与时间。</div>';
+      const cs=p.courseStat||{}; const tn=Object.values(cs).reduce((a,c)=>a+(c.n||0),0);
+      const nTasks=Object.keys(ST.taskDays||{}).length;
+      return `<div class="row" style="margin-top:6px;flex-wrap:wrap;gap:8px">
+        <span class="tag ok">生效计划: ${esc(p.source||"确定性引擎")}</span>
+        <span class="tag">生成于 ${esc(p.generatedAt)}</span>
+        <span class="tag">月${(p.months||[]).length}个 · 周${(p.months||[]).reduce((a,m)=>a+(m.weeks||[]).length,0)}个</span>
+        <span class="tag">已排 ${tn} 讲课程</span>
+        <span class="tag">每日任务已落位 ${nTasks} 天</span></div>
+      <div class="muted" style="margin-top:6px;font-size:11.5px">每日任务、月/周/天结构与进度校准一律以本计划为准${ST.aiPlan&&ST.aiPlan.md?"；下方 AI 计划作为策略指导文档, 不驱动任务。":""}。改动上述配置后请重新生成。</div>`; })()}
     <div class="row" style="margin-top:8px;flex-wrap:wrap">
       <label>周末强度系数</label><input type="number" id="plan-wk" step="0.1" value="${s.weekendFactor||1.5}" style="width:60px"><label>×</label>
       <label>番茄钟</label><input type="number" id="plan-pomo" value="${s.pomo||25}" style="width:60px"><label>分钟</label>
       <button class="btn" onclick="Plan.gen()">生成确定性计划</button>
-      <button class="btn ghost" onclick="Plan.pomoStart()">🍅 开始专注</button></div>
+      <button class="btn ghost" onclick="Plan.pomoStart()">🍅 开始专注</button>
+      ${ST.plan&&ST.plan.generatedAt?`<button class="btn sm ghost" onclick="Plan.ensureTasks(true);toast('未来30天每日任务已按当前计划重算');renderPlanMini($('#plan-today'))">重算每日任务</button>`:""}</div>
     <div id="pomo-box" class="muted" style="margin-top:6px"></div>
     <div id="det-plan-out"></div></div>
 
@@ -1606,6 +1655,8 @@ function vPlan(){
   Plan.renderCalib();
   Plan.renderAi();
 }
+/* P6: 视频观看百分比 (无时长但有进度按 1% 记为"已开过头") */
+function vidPct(v){ if(!v) return 0; if(!v.dur) return v.pos>0?1:0; return Math.min(100,Math.round((v.pos||0)/v.dur*100)); }
 const Plan={save(){
   const sel=$("#plan-exam"); const ci=$("#plan-exam-custom");
   ST.settings.examName = sel.value==="自定义"? (ci.value.trim()||"自定义考试") : sel.value;
@@ -1622,6 +1673,47 @@ const Plan={save(){
 },
 /* 科目清单: 以考纲科目表为准(默认内置17科), 合并用户覆盖(类别/状态/权重); 题库章节映射其上统计进度 */
 syllabus(){ return (Array.isArray(ST.syllabus)&&ST.syllabus.length)?ST.syllabus:SYLLABUS_PRESET; },
+/* ---------- P6: 跟课学习资源映射 ---------- */
+/* 顶层章节 id: "a1-2" -> "a1" */
+topCh(c){ return String(c||"").split("-")[0]; },
+/* 科目 -> 该科目下尚未看完的视频(未看完优先, 其次按添加顺序) */
+courseOfSubj(id){
+  const sj=this.syllabus().find(x=>x.id===id); if(!sj) return [];
+  const chs=(sj.chapters||[]).map(c=>this.topCh(c));
+  if(!chs.length) return [];
+  const vs=(ST.videos||[]).filter(v=>v&&chs.includes(this.topCh(v.chapterId)));
+  return vs.filter(v=>vidPct(v)<99).sort((a,b)=>(a.ts||0)-(b.ts||0));
+},
+/* 科目 -> 该科目下已录入视频数/已看完数 */
+courseStat(id){ const vs=(()=>{ const sj=this.syllabus().find(x=>x.id===id); if(!sj) return [];
+    const chs=(sj.chapters||[]).map(c=>this.topCh(c)); if(!chs.length) return [];
+    return (ST.videos||[]).filter(v=>v&&chs.includes(this.topCh(v.chapterId))); })();
+  return {n:vs.length,done:vs.filter(v=>vidPct(v)>=99).length}; },
+/* 阶段 -> 当日"听课占比"(0~1) */
+ratioOf(phase){ const r=(ST.settings&&ST.settings.learnRatio)||{};
+  const v=/冲刺/.test(phase||"")?r.sprint:/强化/.test(phase||"")?r.mid:r.base;
+  return Math.max(0,Math.min(0.9,(v==null?0.5:+v)/100)); },
+/* 日期 -> 所属周计划 {m 月, w 周, days 本周天数, idx 该天在周内的序号} */
+weekOf(dt){
+  const p=ST.plan; if(!p||!Array.isArray(p.months)) return null;
+  for(const m of p.months) for(const w of (m.weeks||[])){
+    if(w.start&&w.end&&dt>=w.start&&dt<=w.end){
+      const days=Math.max(1,Math.round((new Date(w.end+"T00:00:00")-new Date(w.start+"T00:00:00"))/864e5)+1);
+      const idx=Math.max(0,Math.round((new Date(dt+"T00:00:00")-new Date(w.start+"T00:00:00"))/864e5));
+      return {m,w,days,idx};
+    }
+  }
+  return null;
+},
+/* 从今日任务里的视频 chip 直接跳到资料库播放 */
+saveRatio(){
+  const g=id=>Math.max(0,Math.min(90,+$("#"+id).value||0));
+  ST.settings.learnRatio={base:g("r-base"),mid:g("r-mid"),sprint:g("r-sprint")};
+  Store.save("settings");
+  if(ST.plan){ ST.plan.learnRatio=ST.settings.learnRatio; Store.save("plan"); this.ensureTasks(true); }
+  toast("已保存学习节奏, 每日任务已按新配比重算");
+},
+openVid(vid){ if(!vid) return; Lib._pendingVid=vid; location.hash="#lib"; },
 migrateSubj(){   // 旧版按章节id的覆盖(a1等)一次性迁移到考纲科目id
   if(ST.settings.subjMigrated) return;
   const m=ST.settings.subjects||{};
@@ -1656,6 +1748,8 @@ _subjRows(){ return this.subjects().map(x=>{const ov=(ST.settings.subjects||{})[
   <td style="text-align:center"><input type="number" min="0" value="${x.examCount}" style="width:64px" onchange="Plan.setExamCount('${x.id}',this.value)" title="考纲题量"></td>
   <td style="text-align:center"><select onchange="Plan.setCat('${x.id}',this.value)">${["calc","mem","mix"].map(c=>`<option value="${c}" ${(ov.cat||x.cat)===c?"selected":""}>${c==="calc"?"理解·工作日":c==="mem"?"记忆·周末":"综合·混合"}</option>`).join("")}</select></td>
   <td style="text-align:center"><select onchange="Plan.setMode('${x.id}',this.value)">${["normal","low","skip"].map(m=>`<option value="${m}" ${(ov.mode||x.mode)===m?"selected":""}>${m==="normal"?"正常":m==="low"?"低优先":"放弃"}</option>`).join("")}</select></td>
+  <td style="text-align:center;white-space:nowrap">${(()=>{const c=this.courseStat(x.id);
+    return c.n?`<span class="tag ${c.done>=c.n?"ok":""}" style="font-size:10.5px" title="该科目下已录入视频 已看完/总数">📺 ${c.done}/${c.n}</span>`:'<span class="muted" style="font-size:11px">未录入</span>';})()}</td>
   <td style="text-align:center">${x.qTotal}</td><td style="text-align:center">${x.qDone}</td><td style="text-align:center">${x.qAcc}%</td>
   <td style="text-align:center"><input type="number" step="0.1" value="${ov.weight!=null?ov.weight:x.weight}" style="width:64px" onchange="Plan.setWeight('${x.id}',this.value)"></td>
   <td style="text-align:center">${x.custom?`<button class="btn sm ghost" onclick="Plan.delSubj('${x.id}')">删除</button>`:""}</td></tr>`;}).join(""); },
@@ -1796,27 +1890,68 @@ gen(){
       const items=picks.map(x=>{ const pool=kpTitles[x.id]||[]; const take=[];
         for(let t=0;t<4&&curKp[x.id]<pool.length;t++){ take.push(pool[curKp[x.id]++]); }
         return {id:x.id,title:x.title,cat:x.cat,kps:take}; });
-      return {range:fmtD(sg[0])+" ~ "+fmtD(sg[sg.length-1]),days:sg.length,
+      return {range:fmtD(sg[0])+" ~ "+fmtD(sg[sg.length-1]),start:fmtD(sg[0]),end:fmtD(sg[sg.length-1]),days:sg.length,
         brushGoal:sg.reduce((a,d)=>a+dayTargetFor(fmtD(d)).brush,0),items};
     });
   });
+  // ---- P6: 课程排程 —— 各科未看完的视频在"该科出现的周"里顺序推进 ----
+  const allWeeks=[]; months.forEach(m=>(m.weeks||[]).forEach(w=>allWeeks.push(w)));
+  const subjWeeks={}; allWeeks.forEach(w=>w.items.forEach(it=>{ (subjWeeks[it.id]=subjWeeks[it.id]||[]).push(w); }));
+  const curLes={}, courseStat={}; Object.keys(subjWeeks).forEach(sid=>{
+    const vs=this.courseOfSubj(sid); curLes[sid]=0;
+    const ws=subjWeeks[sid]; if(!vs.length||!ws.length) return;
+    ws.forEach((w,idx)=>{
+      const left=Math.max(0,vs.length-curLes[sid]);
+      const per=Math.max(1,Math.ceil(left/Math.max(1,ws.length-idx)));
+      const take=vs.slice(curLes[sid],curLes[sid]+per); curLes[sid]+=take.length;
+      const it=w.items.find(i=>i.id===sid);
+      if(it){ const st=this.courseStat(sid); it.lessons=take.map(v=>({vid:v.id,title:v.title,pct:vidPct(v)}));
+        it.course={planned:take.length,total:st.n,done:st.done}; }
+    });
+  });
+  Object.keys(subjWeeks).forEach(sid=>{ courseStat[sid]=this.courseStat(sid); });
   months.forEach(m=>delete m.ds);
-  ST.plan={engine:"deterministic",generatedAt:today0,examName:s.examName,examDate,days,total,done,remaining,
-    weekdayMin:+s.weekdayMin,weekendMin:+s.weekendMin,weekendFactor:wk,pomo,factor,
+  ST.plan={engine:"deterministic",v:2,source:"确定性引擎",generatedAt:today0,examName:s.examName,examDate,days,total,done,remaining,
+    weekdayMin:+s.weekdayMin,weekendMin:+s.weekendMin,weekendFactor:wk,pomo,factor,learnRatio:s.learnRatio||{base:60,mid:40,sprint:15},
     brushW,brushE,newW,newE,catRouting:{calc:"工作日主攻",mem:"周末背诵",mix:"工作日原理+周末综合"},
-    phases,subjectPlan,mockDays,weekdayTemplate,weekendTemplate,months,adj};
-  Store.save("plan"); this.ensureTasks(); this.renderDet(); toast("确定性计划已生成 (含 月→周→天 结构, 已写入未来30天每日任务)");
+    phases,subjectPlan,mockDays,weekdayTemplate,weekendTemplate,months,courseStat,adj};
+  Store.save("plan"); this.ensureTasks(true); this.renderDet();
+  toast("确定性计划已生成 (阶段→月→周→天, 已含跟课排程并写入未来30天每日任务)");
 },
 /* ---- 计划落位到每日任务: 从今天起写满30天, 已有安排的天不覆盖; 之后每月增量续期 ---- */
-ensureTasks(){
+ensureTasks(force){
   if(!ST.taskDays) ST.taskDays={};
   const cut=fmtD(new Date(Date.now()-60*864e5));
   Object.keys(ST.taskDays).forEach(dt=>{ if(dt<cut) delete ST.taskDays[dt]; });   // 清理60天前旧任务
+  const s=ST.settings;
   let added=0;
-  for(let i=0;i<30;i++){ const dt=fmtD(new Date(Date.now()+i*864e5));
-    if(ST.taskDays[dt]) continue;
-    const t=dayTargetFor(dt);
-    ST.taskDays[dt]={brush:t.brush,cards:Math.max(2,Math.round((+ST.settings.weekdayMin||90)/6))};
+  for(let i=0;i<30;i++){
+    const dt=fmtD(new Date(Date.now()+i*864e5));
+    const old=ST.taskDays[dt];
+    if(old&&old.v===2&&!force) continue;
+    const w=this.weekOf(dt);
+    const wknd=isWeekend(new Date(dt+"T00:00:00"));
+    const raw=w?dayTargetFor(dt,1):dayTargetFor(dt);           // 未扣假期的基准 minutes→题量
+    const hd=isHoliday(dt);
+    let mins=wknd?(+s.weekendMin||240):(+s.weekdayMin||90);
+    const items=(w&&w.w.items)||[];
+    const lessons=items.flatMap(it=>it.lessons||[]);
+    // 本周课程按天均分 -- 未开始的/已开头的优先排前面
+    const per=Math.ceil(lessons.length/Math.max(1,w?w.days:1));
+    const mine=lessons.slice((w?w.idx:0)*per,(w?w.idx:0)*per+per);
+    const ratio=mine.length?this.ratioOf(w?w.m.phase:""):0;
+    let brushMin=mins;
+    if(mine.length) brushMin=Math.round(mins*(1-ratio)); else if(lessons.length) brushMin=mins;
+    if(hd) brushMin=Math.round(brushMin*(hd.intensity||0.4));
+    let brush=Math.max(hd?3:5,Math.round(brushMin/2.2));
+    if(raw.sprint) brush=0;                                     // 冲刺期: 模考+错题为主
+    const chs=[]; items.forEach(it=>{ const sj=this.syllabus().find(x=>x.id===it.id);
+      (sj&&sj.chapters||[]).forEach(c=>{ if(!chs.includes(c)) chs.push(c); }); });
+    ST.taskDays[dt]={v:2,brush,cards:Math.max(2,Math.round(mins/25)),
+      courseMin:mins-brushMin,brushMin,ratio:Math.round(ratio*100),
+      lessons:mine, targets:items.map(it=>({id:it.id,title:it.title,cat:it.cat})),
+      kps:items.flatMap(it=>it.kps||[]).slice(0,12), chapters:chs,
+      phase:(w&&w.m.phase)||"", week:(w&&w.w.range)||""};
     added++;
   }
   if(added) Store.save("taskDays");
@@ -1835,13 +1970,17 @@ renderHiera(){
     return `<details style="margin:8px 0;border-left:3px solid var(--pri);padding:4px 10px" open>
       <summary style="cursor:pointer"><b>${m.ym}</b> <span class="tag">${esc(m.phase)}</span>
         <span class="muted" style="font-size:12px">目标 ${m.brushGoal} 题${actual?` · 已完成 ${actual} (${pct}%)`:""} · 主攻 ${m.subjects.slice(0,3).map(s=>esc(s.title)).join("、")}</span></summary>
-      ${m.weeks.map(w=>`<details style="margin:6px 0 6px 14px">
-        <summary style="cursor:pointer"><b style="font-size:12.5px">${esc(w.range)}</b> <span class="muted" style="font-size:12px">${w.brushGoal}题 · ${w.items.map(i=>esc(i.title)).join("、")}</span></summary>
+      ${m.weeks.map(w=>{ const wl=(w.items||[]).flatMap(i=>i.lessons||[]);
+        const perDay=Math.max(1,Math.ceil(wl.length/Math.max(1,w.days||7)));
+        return `<details style="margin:6px 0 6px 14px">
+        <summary style="cursor:pointer"><b style="font-size:12.5px">${esc(w.range)}</b> <span class="muted" style="font-size:12px">${w.brushGoal}题${wl.length?` · 跟课 ${wl.length} 讲 (约 ${perDay} 讲/天)`:""} · ${w.items.map(i=>esc(i.title)).join("、")}</span></summary>
+        ${wl.length?`<div style="margin:4px 0 4px 14px;font-size:12px">📺 ${wl.map(v=>`<span class="tag" style="margin-right:4px;cursor:pointer" onclick="Plan.openVid('${v.vid}')">${esc((v.title||"视频").slice(0,18))}</span>`).join("")}</div>`:""}
         ${w.items.map(i=>`<div style="margin:4px 0 4px 14px;font-size:12.5px">
           <span class="tag ${i.cat==="calc"?"":i.cat==="mem"?"ok":"warn"}">${esc(i.title)}</span>
+          ${i.course&&i.course.total?`<span class="muted" style="font-size:11.5px">课程 ${i.course.done}/${i.course.total} 已看完</span>`:""}
           ${i.kps.length?i.kps.map(k=>esc(k)).join(" · "):'<span class="muted">该科知识点已推进完/题库未覆盖, 以刷题为主</span>'}</div>`).join("")}
-        <div class="muted" style="margin-left:14px;font-size:11.5px">每天按工作日/周末额度刷题(假期自动降额), 到期闪卡优先。</div>
-      </details>`).join("")}
+        <div class="muted" style="margin-left:14px;font-size:11.5px">每天顺序: 先跟课/教材 → 再做本周范围的检验题; 额度按工作日/周末折算(假期自动降额), 到期闪卡优先。</div>
+      </details>`; }).join("")}
     </details>`; }).join("");
 },
 /* ---- 进度校准(保大调小): 对比月目标 vs 实际, 天级补量; 月目标确实无法达成才提示调整大计划 ---- */
@@ -2625,7 +2764,7 @@ const Settings={
     if(mode==="replace") SKEYS.forEach(k=>{ const def=ST_DEF[k];
       ST[k]= (def===undefined) ? (k==="exams"||k==="videos"?[]:{}) : JSON.parse(JSON.stringify(def)); });
     SKEYS.forEach(k=>{ if(body[k]!==undefined) ST[k]=body[k]; });
-    ST.settings=Object.assign({examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,targetScore:132,subjMigrated:false,supabaseUrl:"",supabaseKey:""},ST.settings);
+    ST.settings=Object.assign({examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,targetScore:132,subjMigrated:false,learnRatio:{base:60,mid:40,sprint:15},supabaseUrl:"",supabaseKey:""},ST.settings);
     let addImp=0;
     if(imps.length){
       const cur=Imports.all(), names=new Set(cur.map(x=>x.name));
@@ -2807,6 +2946,7 @@ function vLib(){
     <div id="vid-player"></div></div>`;
   Lib.renderExcerpts();
   Lib.vidRender();
+  if(Lib._pendingVid){ const _vid=Lib._pendingVid; Lib._pendingVid=null; setTimeout(()=>Lib.vidPlay(_vid),90); }
   if(window.removeEventListener){ window.removeEventListener("beforeunload",Lib._bu);
     Lib._bu=()=>Lib.stopTimer(); window.addEventListener("beforeunload",Lib._bu);
     document.removeEventListener("visibilitychange",Lib._vis);
