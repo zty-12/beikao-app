@@ -1895,21 +1895,7 @@ gen(){
     });
   });
   // ---- P6: 课程排程 —— 各科未看完的视频在"该科出现的周"里顺序推进 ----
-  const allWeeks=[]; months.forEach(m=>(m.weeks||[]).forEach(w=>allWeeks.push(w)));
-  const subjWeeks={}; allWeeks.forEach(w=>w.items.forEach(it=>{ (subjWeeks[it.id]=subjWeeks[it.id]||[]).push(w); }));
-  const curLes={}, courseStat={}; Object.keys(subjWeeks).forEach(sid=>{
-    const vs=this.courseOfSubj(sid); curLes[sid]=0;
-    const ws=subjWeeks[sid]; if(!vs.length||!ws.length) return;
-    ws.forEach((w,idx)=>{
-      const left=Math.max(0,vs.length-curLes[sid]);
-      const per=Math.max(1,Math.ceil(left/Math.max(1,ws.length-idx)));
-      const take=vs.slice(curLes[sid],curLes[sid]+per); curLes[sid]+=take.length;
-      const it=w.items.find(i=>i.id===sid);
-      if(it){ const st=this.courseStat(sid); it.lessons=take.map(v=>({vid:v.id,title:v.title,pct:vidPct(v)}));
-        it.course={planned:take.length,total:st.n,done:st.done}; }
-    });
-  });
-  Object.keys(subjWeeks).forEach(sid=>{ courseStat[sid]=this.courseStat(sid); });
+  const courseStat=this.scheduleCourses(months);
   months.forEach(m=>delete m.ds);
   ST.plan={engine:"deterministic",v:2,source:"确定性引擎",generatedAt:today0,examName:s.examName,examDate,days,total,done,remaining,
     weekdayMin:+s.weekdayMin,weekendMin:+s.weekendMin,weekendFactor:wk,pomo,factor,learnRatio:s.learnRatio||{base:60,mid:40,sprint:15},
@@ -1917,6 +1903,27 @@ gen(){
     phases,subjectPlan,mockDays,weekdayTemplate,weekendTemplate,months,courseStat,adj};
   Store.save("plan"); this.ensureTasks(true); this.renderDet();
   toast("确定性计划已生成 (阶段→月→周→天, 已含跟课排程并写入未来30天每日任务)");
+},
+/* ---- P6: 把各科未看完的视频排入周计划。可重复调用(增删视频后重排) ---- */
+scheduleCourses(months){
+  const allWeeks=[];
+  (months||[]).forEach(m=>(m.weeks||[]).forEach(w=>{
+    (w.items||[]).forEach(i=>{ delete i.lessons; delete i.course; }); allWeeks.push(w); }));
+  const subjWeeks={}; allWeeks.forEach(w=>(w.items||[]).forEach(it=>{ (subjWeeks[it.id]=subjWeeks[it.id]||[]).push(w); }));
+  const curLes={}, stat={};
+  Object.keys(subjWeeks).forEach(sid=>{
+    const vs=this.courseOfSubj(sid); curLes[sid]=0; stat[sid]=this.courseStat(sid);
+    const ws=subjWeeks[sid]; if(!vs.length||!ws.length) return;
+    ws.forEach((w,idx)=>{
+      const left=Math.max(0,vs.length-curLes[sid]); if(!left) return;
+      const per=Math.max(1,Math.ceil(left/Math.max(1,ws.length-idx)));
+      const take=vs.slice(curLes[sid],curLes[sid]+per); curLes[sid]+=take.length;
+      const it=w.items.find(i=>i.id===sid);
+      if(it&&take.length){ it.lessons=take.map(v=>({vid:v.id,title:v.title,pct:vidPct(v)}));
+        it.course={planned:take.length,total:stat[sid].n,done:stat[sid].done}; }
+    });
+  });
+  return stat;
 },
 /* ---- 计划落位到每日任务: 从今天起写满30天, 已有安排的天不覆盖; 之后每月增量续期 ---- */
 ensureTasks(force){
@@ -2939,9 +2946,31 @@ function vLib(){
       <input id="vid-url" placeholder="视频链接(URL, 如网课地址)" style="flex:1;min-width:200px">
       <select id="vid-chap">${Lib.vidChapOptions("")}</select>
       <button class="btn sm" onclick="Lib.vidAddUrl()">添加链接</button>
-      <label class="btn sm ghost" style="cursor:pointer">选本地文件<input type="file" accept="video/*" style="display:none" onchange="Lib.vidAddFile(this)"></label></div>
+      <label class="btn sm ghost" style="cursor:pointer">选本地文件(可多选)<input type="file" accept="video/*" multiple style="display:none" onchange="Lib.vidAddFile(this)"></label>
+      <button class="btn sm ghost" onclick="Lib.toggleVidImport()">📥 批量导入</button></div>
+    <div id="vid-import-box" style="display:none;margin-top:8px;border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:8px">
+      <div class="muted" style="font-size:11.5px;line-height:1.7">每行一条, 三种写法可混用(空行与 # 开头忽略):<br>
+        <code>https://xxx.com/01.mp4</code><br>
+        <code>第01讲 极限 | https://xxx.com/01.mp4</code><br>
+        <code>第01讲 极限 | https://xxx.com/01.mp4 | 高等数学</code> ← 第三列按章节名自动匹配<br>
+        也支持 <b>CSV 逗号分隔</b>(标题,链接,章节) 与直接拖入导出的 .m3u/.txt 文件。</div>
+      <textarea id="vid-import" rows="6" style="width:100%;margin-top:6px" placeholder="第01讲 极限 | https://... | 高等数学&#10;第02讲 导数 | https://... | 高等数学"
+        oninput="Lib.vidPreview()"></textarea>
+      <div class="row" style="margin-top:6px;flex-wrap:wrap;align-items:center">
+        <label class="muted" style="font-size:11.5px">未指定章节时归类到</label>
+        <select id="vid-bulk-chap"><option value="__auto__">自动匹配(按名称里的章节关键字)</option>${Lib.vidChapOptions("").replace('<option value="">未分类</option>',"")}</select>
+        <button class="btn sm" onclick="Lib.vidImportBatch()">开始导入</button>
+        <label class="btn sm ghost" style="cursor:pointer">导入清单文件<input type="file" accept=".txt,.csv,.m3u,.json" style="display:none" onchange="Lib.vidImportFile(this)"></label>
+        <span class="muted" id="vid-import-sum" style="font-size:11.5px"></span></div>
+    </div>
     <div class="muted" style="font-size:11px;margin-top:4px">本地文件因浏览器安全限制, 刷新后需重新选择文件, 但观看进度会按文件名自动恢复。</div>
     <div class="row" style="margin-top:6px"><input id="vid-kw" placeholder="按标题/章节筛选..." style="flex:1" oninput="Lib.vidRender()"></div>
+    <div class="row" style="margin-top:6px;align-items:center;flex-wrap:wrap">
+      <span class="muted" style="font-size:11.5px">批量操作:</span>
+      <select id="vid-retag">${Lib.vidChapOptions("")}</select>
+      <button class="btn sm ghost" onclick="Lib.vidRetagFiltered()">把当前筛选结果归类到该章节</button>
+      <button class="btn sm bad" onclick="Lib.vidClearLocal()">清理已失效本地视频</button>
+      <span class="muted" style="font-size:11.5px">共 ${(ST.videos||[]).length} 个</span></div>
     <div id="vid-list" class="row" style="margin-top:8px;flex-wrap:wrap"></div>
     <div id="vid-player"></div></div>`;
   Lib.renderExcerpts();
@@ -2958,21 +2987,143 @@ function vLib(){
 Lib.vidChapOptions=function(cur){
   return '<option value="">未分类</option>'+(BANK.chapters||[]).map(c=>`<option value="${c.id}" ${cur===c.id?"selected":""}>${esc(c.title)}</option>`).join("");
 };
+/* ---- P6: 视频批量导入 ---- */
+Lib.toggleVidImport=function(){ const b=$("#vid-import-box"); if(b) b.style.display=b.style.display==="none"?"block":"none"; };
+/* 按名称解析章节 id: 章节名互相包含时取更长的那个, 避免短名误匹配 */
+Lib.resolveChap=function(name){
+  const n=String(name||"").trim().toLowerCase(); if(n.length<2) return "";
+  let best="",bl=0;
+  for(const c of (BANK.chapters||[])){
+    const t=String(c.title||"").trim().toLowerCase(); if(t.length<2) continue;
+    if((n===t||n.indexOf(t)>=0||t.indexOf(n)>=0)&&t.length>bl){ best=c.id; bl=t.length; }
+  }
+  return best;
+};
+Lib._isUrl=function(p){ return /^(https?:\/\/|file:\/\/|blob:|\/|\.\/|\\\\|[a-z]:[\\/])/i.test(p)||/\.(mp4|m3u8|webm|mkv|mov|avi|flv|m4v|ts)$/i.test(p); };
+/* 解析导入文本: 每行 → {url,title,chap} */
+Lib._parseVidRows=function(text){
+  const lines=String(text||"").split(/\r?\n/).map(s=>s.trim()).filter(Boolean).filter(l=>!/^#/.test(l));
+  const rows=[];
+  for(const line of lines){
+    let cells;
+    if(line.indexOf("|")>=0||line.indexOf("\t")>=0) cells=line.split(/[|\t]+/);
+    else if(line.indexOf("，")>=0) cells=line.split(/，+/);
+    else { const cm=line.split(","); cells=cm.filter(Boolean).length<=3?cm:[line]; }
+    cells=cells.map(s=>s.trim()).filter(Boolean);
+    const ui=cells.findIndex(p=>this._isUrl(p));
+    let url=ui>=0?cells[ui]:null;
+    if(!url){ const m=line.match(/https?:\/\/[^\s"'<>]+/); url=m?m[1]:null; }
+    if(!url) continue;
+    const rest=cells.filter((p,i)=>i!==ui&&p!==url);
+    rows.push({url,title:rest[0]||Lib._titleFromUrl(url),chap:rest[1]||""});
+  }
+  return rows;
+};
+Lib._titleFromUrl=function(url){
+  try{
+    const base=String(url).split(/[?#]/)[0].replace(/\\/g,"/");
+    let n=decodeURIComponent(base.split("/").pop()||"").replace(/\.[a-z0-9]{2,5}$/i,"");
+    return n.trim();
+  }catch(e){ return ""; }
+};
+Lib.vidPreview=function(){
+  const ta=$("#vid-import"), s=$("#vid-import-sum"); if(!ta||!s) return;
+  const rows=this._parseVidRows(ta.value);
+  const exist=new Set((ST.videos||[]).map(v=>v.url));
+  const dup=rows.filter(r=>exist.has(r.url)).length;
+  s.textContent="解析到 "+rows.length+" 条"+(dup?` (其中 ${dup} 条链接已存在, 导入时将跳过)`:"");
+};
+Lib.vidImportFile=function(inp){
+  const f=inp.files&&inp.files[0]; if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{
+    let txt=String(r.result||"");
+    if(/\.json$/i.test(f.name)){ try{ const j=JSON.parse(txt);
+        const arr=Array.isArray(j)?j:(j.videos||j.items||[]);
+        txt=(arr||[]).map(x=>typeof x==="string"?x:[x.title,x.url,x.chapterId].filter(Boolean).join(" | ")).join("\n");
+      }catch(e){ toast("JSON 解析失败, 已按文本处理"); } }
+    const ta=$("#vid-import"); if(ta){ ta.value=txt; }
+    const b=$("#vid-import-box"); if(b) b.style.display="block";
+    if(/\.m3u/i.test(f.name)) toast("已读取播放列表");
+    this.vidPreview(); inp.value="";
+  };
+  r.readAsText(f);
+};
+Lib.vidImportBatch=function(){
+  const ta=$("#vid-import"); if(!ta||!ta.value.trim()){ toast("请先粘贴链接清单"); return; }
+  const rows=this._parseVidRows(ta.value);
+  if(!rows.length){ toast("没解析到可导入的链接"); return; }
+  ST.videos=ST.videos||[];
+  const exist=new Set(ST.videos.map(v=>v.url));
+  const def=(($("#vid-bulk-chap")||{}).value)||"__auto__";
+  let added=0,skipped=0,auto=0;
+  const t0=Date.now();
+  rows.forEach((r,i)=>{
+    if(exist.has(r.url)){ skipped++; return; }
+    exist.add(r.url);
+    let cid="";
+    if(r.chap) cid=this.resolveChap(r.chap);
+    if(!cid&&def!=="__auto__") cid=def;
+    if(!cid){ cid=this.resolveChap(r.title)||this.resolveChap(this._titleFromUrl(r.url)); if(cid) auto++; }
+    const title=(r.title||"").trim()||this._titleFromUrl(r.url)||("视频 "+(ST.videos.length+1));
+    ST.videos.push({id:"v"+t0+"_"+i,title,url:r.url,chapterId:cid,pos:0,rate:1,dur:0,ts:t0+i});
+    added++;
+  });
+  Store.save("videos"); Lib.vidRender();
+  ta.value=""; const s=$("#vid-import-sum"); if(s) s.textContent="";
+  let planMsg="";
+  if(added&&ST.plan&&(ST.plan.months||[]).length){       // 新导入的课程自动排进周计划
+    ST.plan.courseStat=Plan.scheduleCourses(ST.plan.months); Store.save("plan");
+    Plan.ensureTasks(true); planMsg=" · 已自动排入周计划";
+  } else if(added&&ST.plan){ planMsg=" · 重新生成计划后排入每日任务"; }
+  toast(`导入完成: 新增 ${added}${skipped?" · 跳过重复 "+skipped:""}${auto?" · 自动归类 "+auto:""}${planMsg}`);
+};
+/* 把当前筛选结果批量归类到某章节 */
+Lib.vidRetagFiltered=function(){
+  const cid=(($("#vid-retag")||{}).value)||"";
+  const kw=((($("#vid-kw")||{}).value)||"").toLowerCase();
+  const hits=(ST.videos||[]).filter(v=>!kw||(v.title||"").toLowerCase().includes(kw)||(v.chapterId||"").toLowerCase().includes(kw));
+  if(!hits.length){ toast("当前筛选没有视频"); return; }
+  if(!confirm(`把当前筛选的 ${hits.length} 个视频归类到「${cid?chapPath(cid):"未分类"}」?`)) return;
+  hits.forEach(v=>v.chapterId=cid); Store.save("videos"); Lib.vidRender();
+  toast("已归类 "+hits.length+" 个视频");
+};
+/* 清理 blob: 链接失效的本地视频记录(进度仍保留在同名记录里) */
+/* 本地文件在本会话内创建的 blob: 地址才有效; 上一个会话遗留的一律视为失效 */
+Lib._sess="s"+Date.now().toString(36);
+Lib.vidClearLocal=function(){
+  const dead=(ST.videos||[]).filter(v=>v.local&&(v.sess!==Lib._sess));
+  if(!dead.length){ toast("没有失效的本地视频记录"); return; }
+  if(!confirm("清理 "+dead.length+" 条已失效的本地视频记录?\n(本地文件刷新后 blob 地址会失效, 但观看进度已按文件名保留, 重新选择文件即可恢复)")) return;
+  const ids=new Set(dead.map(v=>v.id));
+  ST.videos=(ST.videos||[]).filter(v=>!ids.has(v.id));
+  Store.save("videos"); Lib.vidRender(); toast("已清理 "+dead.length+" 条");
+};
 Lib.vidAddUrl=function(){
   const url=$("#vid-url").value.trim(); if(!url){ toast("请输入视频链接"); return; }
   ST.videos=ST.videos||[];
-  ST.videos.push({id:"v"+Date.now(),title:$("#vid-title").value.trim()||("视频 "+(ST.videos.length+1)),
-    url,chapterId:$("#vid-chap").value||"",pos:0,rate:1,dur:0,ts:Date.now()});
+  const exist=ST.videos.some(v=>v.url===url);
+  if(exist){ toast("该链接已在列表中, 已跳过"); $("#vid-url").value=""; return; }
+  const title=$("#vid-title").value.trim()||this._titleFromUrl(url)||("视频 "+(ST.videos.length+1));
+  ST.videos.push({id:"v"+Date.now(),title,url,
+    chapterId:$("#vid-chap").value||this.resolveChap(title)||"",pos:0,rate:1,dur:0,ts:Date.now()});
   Store.save("videos"); $("#vid-url").value=""; $("#vid-title").value="";
   Lib.vidRender(); toast("视频已添加");
 };
 Lib.vidAddFile=function(inp){
-  const f=inp.files&&inp.files[0]; if(!f) return;
+  const fs=[...(inp.files||[])]; if(!fs.length) return;
   ST.videos=ST.videos||[];
-  const prev=ST.videos.find(x=>x.title===f.name);   // 同名文件恢复上次进度
-  ST.videos.push({id:"v"+Date.now(),title:f.name,url:URL.createObjectURL(f),local:true,
-    chapterId:$("#vid-chap").value||(prev&&prev.chapterId)||"",pos:(prev&&prev.pos)||0,rate:(prev&&prev.rate)||1,dur:(prev&&prev.dur)||0,ts:Date.now()});
-  Store.save("videos"); Lib.vidRender(); toast("已添加本地视频"+(prev?"(进度已按同名文件恢复)":"")); inp.value="";
+  const chap=$("#vid-chap").value||"";
+  let added=0,restored=0;
+  fs.forEach((f,i)=>{
+    const prev=ST.videos.find(x=>x.title===f.name&&x.local);   // 同名文件恢复上次进度
+    ST.videos.push({id:"v"+Date.now()+"_"+i,title:f.name,url:URL.createObjectURL(f),local:true,
+      chapterId:chap||this.resolveChap(f.name)||(prev&&prev.chapterId)||"",sess:Lib._sess,
+      pos:(prev&&prev.pos)||0,rate:(prev&&prev.rate)||1,dur:(prev&&prev.dur)||0,ts:Date.now()+i});
+    if(prev) restored++; added++;
+  });
+  Store.save("videos"); Lib.vidRender();
+  toast(`已添加 ${added} 个本地视频${restored?" ("+restored+" 个已按同名恢复进度)":""}`); inp.value="";
 };
 Lib.vidDel=function(id){
   if(!confirm("删除该视频记录?")) return;
