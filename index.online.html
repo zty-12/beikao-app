@@ -1355,27 +1355,55 @@ async aiGen(adjust){
   if(!cfg.url||!cfg.key){ toast("请先到 设置 → AI 接口 填写接口地址与密钥"); return; }
   const mins=+($("#ai-min")||{}).value||120;
   const stats=this.aiStats();
-  const prompt=`你是备考规划专家。请为以下考生制定/调整备考学习计划。
-考试日期: ${ST.settings.examDate||"未设置"}; 今天: ${today()}; 每日可学习: ${mins}分钟; 每日目标: 刷题${ST.settings.dailyBrush}题+新卡${ST.settings.dailyNew}张。
-各科目掌握情况(章: 题量/已刷/正确率): ${stats.map(c=>c.章+"("+c.题量+"题,已刷"+c.已刷+","+c.正确率+")").join("；")}。
-${adjust&&ST.aiPlan?"这是之前的计划与当前进度, 请重点调整未完成部分并动态调整重点: "+JSON.stringify(ST.aiPlan).slice(0,1800):"请按时间分阶段(基础/强化/冲刺)。"}
-只输出 JSON, 不要 markdown 代码块, 结构: {"summary":"总体策略一句话","phases":[{"name":"阶段名","dateRange":"MM.DD-MM.DD","goals":["目标"],"dailyTasks":["每日安排"],"focus":["重点章节"]}],"weekly":[{"week":"第1周","task":"本周重点"}]}`;
-  const out=$("#ai-plan-out"); if(out) out.innerHTML='<div class="muted">AI 正在生成计划, 请稍候…</div>';
+  const isLocal=/127\.0\.0\.1|localhost/.test(cfg.url||"");
+  const statsLine=stats.map(c=>c.章+"("+c.题量+"题,已刷"+c.已刷+","+c.正确率+")").join("；");
+  const prompt=`你是资深备考规划专家。请为以下考生输出一份完整、可直接执行的备考学习计划文档(Markdown)。
+【基本信息】注册环保工程师基础考试；考试日期: ${ST.settings.examDate||"未设置"}；今天: ${today()}；每日可学习: ${mins}分钟；每日目标: 刷题${ST.settings.dailyBrush}题+新卡${ST.settings.dailyNew}张。
+【各章掌握情况】(章: 题量/已刷/正确率) ${statsLine}。
+【输出结构】严格按以下标题结构输出, 每一节都必须写出具体、可执行的实质内容(具体到章节名/日期/天数/题量/正确率数字), 禁止留空、禁止只写括号里的提示语、禁止输出"略"或占位符:
+# 备考学习计划
+## 一、总体概览
+(3~5行: 距考试剩余天数、总题量与已完成量、通过率要求、一句话核心策略)
+## 二、阶段规划
+### 阶段一 · 阶段名(起止日期)
+- 目标: (写清该阶段结束时达到什么水平)
+- 重点章节: (从掌握数据里点名具体薄弱章, 至少3个)
+- 量化指标: (阶段总刷题量/目标正确率/模考次数, 用数字)
+- 主要手段: (顺序刷题/错题清零/背诵卡/套卷模考, 说明怎么用)
+### 阶段二 · ...(同上结构)
+### 阶段三 · ...(同上结构)
+## 三、每周安排
+| 周次 | 所属阶段 | 本周重点 | 刷题目标 | 背诵目标 |
+(每阶段列2~3个代表周, 本周重点要写具体章节名)
+## 四、每日执行模板
+| 环节 | 时长 | 内容 |
+(把每日${mins}分钟拆分到 刷题/背诵/错题复盘/模考, 时长总和= ${mins}分钟, 内容写具体做什么)
+## 五、科目策略
+(结合掌握数据逐章分析: 未刷的章怎么启动、正确率低的章怎么补救、正确率高的章怎么保持, 每章1~2句)
+## 六、动态调整机制
+(每周末复评什么指标、正确率低于多少触发什么调整、进度落后怎么补)
+${adjust&&ST.aiPlan&&ST.aiPlan.md?"【已有计划与最新进度】保留已完成部分, 重点调整未完成内容:\n"+String(ST.aiPlan.md).slice(0,1600):"基线: 按基础/强化/冲刺三阶段展开。"}
+只输出 Markdown 正文本身, 不要用代码块包裹, 不要附加任何解释。`;
+  const out=$("#ai-plan-out"); if(out) out.innerHTML='<div class="muted">AI 正在生成计划, 请稍候…'+(isLocal?'<br>使用本地模型, 生成约需 1~3 分钟, 请勿关闭页面':'')+'</div>';
   try{
     const r=await fetch(cfg.url.replace(/\/+$/,"")+"/chat/completions",{method:"POST",
       headers:{"Content-Type":"application/json",Authorization:"Bearer "+cfg.key},
       body:JSON.stringify({model:cfg.model||"deepseek-chat",messages:[{role:"user",content:prompt}],temperature:0.4})});
     if(!r.ok) throw new Error("HTTP "+r.status+" "+(await r.text()).slice(0,140));
     const j=await r.json();
-    let txt=(j.choices[0].message.content||"").trim().replace(/^```(json)?/i,"").replace(/```$/,"").trim();
-    const plan=JSON.parse(txt);
-    plan.generatedAt=today(); plan.adjusted=!!adjust; ST.aiPlan=plan; Store.save("aiPlan");
+    let txt=(j.choices[0].message.content||"").trim().replace(/^```(markdown|md)?\s*/i,"").replace(/```\s*$/,"").trim();
+    if(!txt||txt.length<80) throw new Error("模型返回内容为空或过短");
+    ST.aiPlan={md:txt,generatedAt:today(),adjusted:!!adjust}; Store.save("aiPlan");
     this.renderAi(); toast(adjust?"AI 已按进度调整计划":"AI 计划已生成");
   }catch(e){ if(out) out.innerHTML='<div class="muted" style="color:#c0392b">生成失败: '+esc(String(e.message||e))+'<br>请检查 AI 接口配置(地址/Key/模型名)或换支持浏览器直连的服务商。</div>'; }
 },
 renderAi(){
   const out=$("#ai-plan-out"); if(!out) return;
   const p=ST.aiPlan; if(!p){ out.innerHTML=""; return; }
+  if(p.md){
+    out.innerHTML=`<div class="muted" style="margin:10px 0 4px;font-size:12px">${p.adjusted?"已按进度动态调整":"生成于 "+esc(p.generatedAt||"")} · <a href="#" onclick="Plan.copyMd();return false">复制全文</a> · <a href="#" onclick="Plan.dlMd();return false">导出 .md</a></div>`+this.mdMini(p.md);
+    return;
+  }
   out.innerHTML=`<div class="muted" style="margin:10px 0 4px">${esc(p.summary||"")}<span style="margin-left:8px">(${p.adjusted?"已按进度动态调整":"生成于 "+esc(p.generatedAt||"")})</span></div>
   ${(p.phases||[]).map(ph=>`<div style="border-left:3px solid var(--pri);padding:4px 10px;margin:10px 0">
     <b>${esc(ph.name||"")}</b> <span class="muted">${esc(ph.dateRange||"")}</span>
@@ -1383,7 +1411,41 @@ renderAi(){
     ${(ph.goals||[]).map(g=>`<div style="margin-top:2px">· ${esc(g)}</div>`).join("")}
     ${(ph.dailyTasks||[]).map(t=>`<div class="muted" style="font-size:12px">▸ ${esc(t)}</div>`).join("")}</div>`).join("")}
   ${(p.weekly||[]).map(w=>`<div class="row" style="margin:2px 0"><span class="muted" style="width:64px">${esc(w.week||"")}</span><span style="font-size:13px">${esc(w.task||"")}</span></div>`).join("")}`;
-}};
+},
+mdMini(src){
+  const inline=t=>esc(t).replace(/`([^`]+)`/g,"<code style='background:var(--pri-weak);padding:0 4px;border-radius:3px'>$1</code>").replace(/\*\*([^*]+)\*\*/g,"<b>$1</b>");
+  const lines=String(src||"").replace(/\r/g,"").split("\n");
+  let h="",list=null,table=null;
+  const closeList=()=>{ if(list){h+="</"+list+">";list=null;} };
+  const closeTable=()=>{
+    if(!table) return;
+    const rows=table.filter(r=>!r.every(c=>/^:?-+:?$/.test(c)));
+    if(rows.length){
+      h+="<div style='overflow-x:auto;margin:8px 0'><table style='width:100%;border-collapse:collapse;font-size:12.5px'>";
+      rows.forEach((r,ri)=>{ const tag=ri===0?"th":"td";
+        h+="<tr>"+r.map(c=>"<"+tag+" style='border:1px solid var(--line);padding:4px 8px;text-align:left'>"+inline(c)+"</"+tag+">").join("")+"</tr>"; });
+      h+="</table></div>";
+    }
+    table=null;
+  };
+  const closeAll=()=>{ closeList(); closeTable(); };
+  for(const l of lines){
+    const t=l.trim(); let m;
+    if(/^\|.*\|$/.test(t)){ closeList(); (table=table||[]).push(t.replace(/^\||\|$/g,"").split("|").map(c=>c.trim())); continue; }
+    closeTable();
+    if(!t){ closeList(); continue; }
+    if(m=t.match(/^(#{1,4})\s+(.+)$/)){ closeList(); const lv=m[1].length+1; h+="<h"+lv+" style='margin:"+(lv<=2?"14px 0 6px":"10px 0 4px")+";font-size:"+(19-lv*1.5)+"px'>"+inline(m[2])+"</h"+lv+">"; continue; }
+    if(/^([-*_] ?){3,}$/.test(t)){ closeList(); h+="<hr style='border:none;border-top:1px solid var(--line);margin:10px 0'>"; continue; }
+    if(m=t.match(/^[-*]\s+(.+)$/)){ if(list!=="ul"){ closeList(); h+="<ul style='margin:4px 0 4px 20px;padding:0'>"; list="ul"; } h+="<li style='margin:3px 0'>"+inline(m[1])+"</li>"; continue; }
+    if(m=t.match(/^\d+[.、)]\s+(.+)$/)){ if(list!=="ol"){ closeList(); h+="<ol style='margin:4px 0 4px 20px;padding:0'>"; list="ol"; } h+="<li style='margin:3px 0'>"+inline(m[1])+"</li>"; continue; }
+    closeList(); h+="<p style='margin:6px 0'>"+inline(t)+"</p>";
+  }
+  closeAll();
+  return h;
+},
+copyMd(){ navigator.clipboard.writeText((ST.aiPlan&&ST.aiPlan.md)||"").then(()=>toast("已复制计划全文")); },
+dlMd(){ download("beikao-plan-"+today().replace(/-/g,"")+".md",(ST.aiPlan&&ST.aiPlan.md)||"","text/markdown"); toast("已导出计划 .md"); }
+};
 
 /* ================= 校对台 ================= */
 const Proof={queue:[],pos:0,f:{kind:"todo",book:"",ch:""}};
