@@ -196,9 +196,9 @@ function bookOfCh(cid){ if(!cid) return null;
 
 /* ================= 本地存储 (IndexedDB + localStorage 兜底) ================= */
 const ST = {progress:{}, srs:{}, settings:{examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,
-  weekdayMin:90,weekendMin:240,subjects:{},theme:"light",
-  supabaseUrl:"",supabaseKey:""}, plan:{}, exams:[], overrides:{}, daily:{},
-  lib:{read:{},time:{},excerpts:[]}};
+  weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,
+  supabaseUrl:"",supabaseKey:""}, plan:{}, exams:[], examTemplates:[], holidays:[],
+  overrides:{}, daily:{}, lib:{read:{},time:{},excerpts:[]}};
 const SKEYS=["progress","srs","settings","plan","exams","overrides","daily","lib","videos","aiPlan"];
 const ST_DEF=JSON.parse(JSON.stringify(ST));   // 出厂默认值快照, 供「全量覆盖导入」复位
 let _mem={};
@@ -217,7 +217,7 @@ const Store={
       })));
     }catch(e){ Store.db=null; SKEYS.forEach(k=>{_mem[k]=localStorage.getItem("bk_"+k);}); }
     SKEYS.forEach(k=>{ if(_mem[k]) try{ST[k]=JSON.parse(_mem[k]);}catch(_){} });
-    ST.settings=Object.assign({examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,weekdayMin:90,weekendMin:240,subjects:{},theme:"light",supabaseUrl:"",supabaseKey:""},ST.settings);
+    ST.settings=Object.assign({examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,supabaseUrl:"",supabaseKey:""},ST.settings);
   },
   db:null,
   async save(k){
@@ -388,7 +388,7 @@ function mediaSrc(m){ return pageImgSrc(m); }   // 本地: app/ 相对项目根;
 function nextPageSrc(m){ const s=String(m.src||"").replace(/\\/g,"/").replace(/page_(\d+)\.png/,(x,d)=>"page_"+(+d+1)+".png"); return pageImgSrc(s); }   // 答案/解析常在下一页
 const NAVS=[["home","首页","home"],["brush","刷题","brush"],["exam","模拟考试","exam"],
   ["cards","闪卡背诵","cards"],["tree","知识树","tree"],["lib","资料库","lib"],["wrong","错题本","wrong"],
-  ["plan","学习计划","plan"],["proof","校对台","proof"],["stats","统计","stats"],["set","设置","set"]];
+  ["plan","学习计划","plan"],["weekly","周复盘","weekly"],["proof","校对台","proof"],["stats","统计","stats"],["set","设置","set"]];
 function drawNav(cur){
   const a=NAVS.map(([r,t])=>`<a href="#${r}" class="${cur===r?"on":""}">${t}</a>`).join("");
   $("#nav").innerHTML=a;
@@ -437,8 +437,10 @@ function vHome(){
     <div class="muted">${esc(b.subject)} · ${b.source.pages}页 · ${esc(b.source.llmModel||"")} 识别</div></div>
     <button class="btn sm ghost" onclick="Brush.f.book='${esc(b.tag)}';ST.settings.bankFilter='${esc(b.tag)}';Store.save('settings');location.hash='#brush'">只刷此书</button></div>`).join("")}
   ${ST.settings.bankFilter?`<div class="muted" style="margin-top:6px">当前分刷范围: <b>${esc((bookMetaAll().find(b=>b.tag===ST.settings.bankFilter)||{}).title||"全部")}</b> · <a href="#" style="color:var(--pri)" onclick="Brush.f.book='';ST.settings.bankFilter='';Store.save('settings');vHome();return false">恢复全部题库</a></div>`:""}
-  </div>`;
+  </div>
+  <div class="card"><h2 style="font-size:14px">本周复盘 <span class="muted" style="font-size:11px">(近 7 天)</span></h2><div id="home-weekly"></div></div>`;
   renderPlanMini($("#home-plan"));
+  renderWeekly($("#home-weekly"));
 }
 
 /* ================= 刷题 ================= */
@@ -601,6 +603,15 @@ function vExam(){
   el.innerHTML=`<h2>模拟考试</h2>
   <div class="card">${rules||"<span class='muted'>题库暂无考试规则</span>"}
   <div class="muted" style="margin-top:8px">抽题 = 按数量在覆盖范围内加权随机(优先未做过、错题加权), 无答案题不判分。</div></div>
+  <div class="card"><h2 style="font-size:14px">我的模考模板 <span class="muted" style="font-size:11px">(保存一次配置, 之后每次按模板随机组卷)</span></h2>
+    <div id="exam-templates"></div>
+    <div class="row" style="margin-top:8px;flex-wrap:wrap;align-items:center">
+      <input id="tpl-name" placeholder="模板名(如: 周末全真模考)" style="width:180px">
+      <label class="muted">随机策略</label>
+      <select id="tpl-policy"><option value="random">每次随机抽题</option><option value="fixed">固定卷(同一套)</option></select>
+      <button class="btn sm" onclick="Exam.saveTemplate()">保存当前配置为模板</button>
+      <span class="muted" style="font-size:12px">· 固定卷适合「同一套反复刷、对比进步」。</span>
+    </div></div>
   <div class="card"><h2 style="font-size:14px">自定义组卷</h2><div id="custom-form"></div>
     <div class="muted" id="custom-summary" style="margin-top:8px"></div>
     <div class="row" style="margin-top:10px"><button class="btn" onclick="Exam.beginCustom()">按此配置开考</button></div>
@@ -608,6 +619,7 @@ function vExam(){
       <textarea id="rule-json" rows="6" style="margin-top:6px" readonly></textarea></details></div>
   <div id="exam-area"></div>`;
   Exam.renderCustom();
+  Exam.renderTemplates();
 };
 /* ---- 自定义组卷表单（可视化, 免写 JSON） ---- */
 Exam.custom={name:"自定义模拟卷",duration:120,books:null,chapters:[],   // books:null = 全选, 渲染时按真实书目展开
@@ -813,7 +825,48 @@ Exam.toggleSub=function(id,on){
 Exam.begin=function(id){
   const r=(BANK.examRules||[]).find(x=>x.id===id); if(r) this._run(r);
 };
-Exam._run=function(rule){
+/* ---- 模考模板(可保存一次配置, 之后每次按模板随机组卷) ---- */
+Exam.beginTemplate=function(id){
+  const t=ST.examTemplates.find(x=>x.id===id); if(!t) return;
+  this.custom=JSON.parse(JSON.stringify(t.custom));
+  const rule=this.buildCustomRule();
+  const rng = (t.seedPolicy==="fixed") ? mulberry32(t.seed||1) : Math.random;
+  this._run(rule,rng);
+};
+Exam.loadTemplate=function(id){
+  const t=ST.examTemplates.find(x=>x.id===id); if(!t) return;
+  this.custom=JSON.parse(JSON.stringify(t.custom));
+  this.renderCustom(); toast("已载入模板「"+(t.name||"未命名")+"」, 可直接修改或开考");
+};
+Exam.delTemplate=function(id){
+  if(!confirm("删除该模考模板? (不影响已生成的考试报告)")) return;
+  ST.examTemplates=ST.examTemplates.filter(x=>x.id!==id); Store.save("examTemplates"); vExam();
+  toast("模板已删除");
+};
+Exam.saveTemplate=function(){
+  const c=this.custom;
+  const name=($("#tpl-name")&&$("#tpl-name").value.trim())||c.name||"我的模考卷";
+  const policy=($("#tpl-policy")&&$("#tpl-policy").value)||"random";
+  const seed=policy==="fixed"?Math.floor(Math.random()*1e9):0;
+  const t={id:"tpl"+Date.now(),name,duration:c.duration,
+    seedPolicy:policy,seed,
+    custom:JSON.parse(JSON.stringify({name:c.name,duration:c.duration,books:c.books,chapters:c.chapters,sections:c.sections}))};
+  ST.examTemplates=ST.examTemplates||[];
+  ST.examTemplates.push(t); Store.save("examTemplates"); vExam();
+  toast("已保存模板「"+name+"」"+(policy==="fixed"?(" (固定种子 "+seed+", 每次同一套)"):" (每次随机抽题)"));
+};
+Exam.renderTemplates=function(){
+  const box=$("#exam-templates"); if(!box) return;
+  const ts=ST.examTemplates||[];
+  if(!ts.length){ box.innerHTML='<div class="muted" style="font-size:12px">暂无保存的模板。配置好上方「自定义组卷」后，点「保存为模板」即可一键复现。</div>'; return; }
+  box.innerHTML=ts.map(t=>`<div class="list-row"><div class="grow">
+    <b>${esc(t.name)}</b> <span class="muted">${t.custom.sections.map(s=>s.count+"题/"+s.scorePerQuestion+"分").join(" + ")} · ${t.duration}分钟 · ${t.seedPolicy==="fixed"?"固定卷":"随机卷"}</span></div>
+    <button class="btn sm" onclick="Exam.beginTemplate('${t.id}')">开考</button>
+    <button class="btn sm ghost" onclick="Exam.loadTemplate('${t.id}')">载入</button>
+    <button class="btn sm ghost" onclick="Exam.delTemplate('${t.id}')">删除</button></div>`).join("");
+};
+Exam._run=function(rule,rng){
+  rng=rng||Math.random;
   const used=new Set(); const paper=[];
   for(const sec of rule.sections||[]){
     let pool=allQ().filter(q=>q.stem&&q.options.length>=2&&!q.incomplete)
@@ -830,7 +883,7 @@ Exam._run=function(rule){
     }
     const picks=[];
     while(picks.length<Math.min(sec.count,weighted.length? new Set(weighted.map(q=>q.id)).size:0)){
-      const q=weighted[Math.floor(Math.random()*weighted.length)];
+      const q=weighted[Math.floor(rng()*weighted.length)];
       if(used.has(q.id)||picks.includes(q)) continue;
       picks.push(q); used.add(q.id);
     }
@@ -842,6 +895,9 @@ Exam._run=function(rule){
   this.timer=setInterval(()=>this.tick(),1000);
   this.draw();
 };
+/* 可选: 业务无关的确定性随机(用于「固定种子」模考模板, 每次组出同一套卷) */
+function mulberry32(seed){ let a=seed>>>0; return function(){ a|=0; a=a+0x6D2B79F5|0;
+  let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
 Exam.tick=function(){
   const left=(this.rule.durationMinutes*60)-Math.floor((Date.now()-this.start)/1000);
   const t=$("#exam-timer"); if(t) t.textContent=Math.floor(left/60)+":"+String(left%60).padStart(2,"0");
@@ -916,7 +972,9 @@ Exam.submit=function(){
   toast("已交卷, 错题已入错题本");
 };
 
-/* ================= 闪卡 + SRS (SM-2) ================= */
+/* ================= 闪卡 + SRS (SM-2 / 艾宾浩斯) ================= */
+/* 艾宾浩斯遗忘曲线固定复习节点(天): 学后第 1/2/4/7/15/30/90/180 天各复习一次 */
+const EB=[1,2,4,7,15,30,90,180];
 function allCards(){
   const isNum=t=>/^\d+(\.\d+)*$/.test(String(t||"").trim());
   const cCards=[], bCards=[], cards=[];
@@ -969,13 +1027,22 @@ const Cards={queue:null,cur:null,show:false};
 function vCards(){
   const el=$("#main"); Cards.queue=null;
   const due=dueCards().length, fresh=Math.min(+ST.settings.dailyNew||20,newCards(9999).length);
-  el.innerHTML=`<h2>闪卡背诵 <span class="muted" style="font-size:12px">SM-2 算法</span></h2>
+  const eb=ST.settings.srsMode==="eb";
+  el.innerHTML=`<h2>闪卡背诵 <span class="muted" style="font-size:12px">${eb?"艾宾浩斯固定间隔":"SM-2 自适应"}</span></h2>
   <div class="card"><div class="kv">
     <div class="item"><div class="muted">今日到期</div><div class="num">${due}</div></div>
     <div class="item"><div class="muted">新卡可用</div><div class="num">${fresh}</div></div>
     <div class="item"><div class="muted">在学卡片</div><div class="num">${Object.keys(ST.srs).length}</div></div></div>
-    <div class="row"><button class="btn" onclick="Cards.start()">开始背诵</button>
-      <span class="muted">评分: 1 忘记 · 2 困难 · 3 良好 · 4 简单 (键盘 1-4)</span></div></div>
+    <div class="row" style="margin-top:8px;flex-wrap:wrap;align-items:center">
+      <label class="muted">复习算法</label>
+      <select id="srs-mode" onchange="Cards.setMode(this.value)">
+        <option value="sm2" ${!eb?"selected":""}>SM-2 自适应</option>
+        <option value="eb" ${eb?"selected":""}>艾宾浩斯固定间隔</option></select>
+      <button class="btn" onclick="Cards.start()">开始背诵</button>
+      <span class="muted">评分: 1 忘记 · 2 困难 · 3 良好 · 4 简单 (键盘 1-4)</span></div>
+    ${eb?`<div class="muted" style="margin-top:6px;font-size:12px">记忆曲线节点: 学后第 ${EB.join(" / ")} 天各复习一次；评「记得」推进下一节点，评「忘了」回到首节点重学。</div>`
+      :`<div class="muted" style="margin-top:6px;font-size:12px">SM-2 按你的评分动态调整复习间隔，记得越牢间隔越长。</div>`}
+  </div>
   <div id="card-area"></div>`;
   if(Cards.keyHandler) document.removeEventListener("keydown",Cards.keyHandler);
   Cards.keyHandler=e=>{
@@ -986,6 +1053,10 @@ function vCards(){
   };
   document.addEventListener("keydown",Cards.keyHandler);
 }
+Cards.setMode=function(m){
+  ST.settings.srsMode=m; Store.save("settings"); vCards();
+  toast(m==="eb"?"已切换: 艾宾浩斯固定间隔":""+("已切换: SM-2 自适应"));
+};
 Cards.start=function(){
   const d=dueCards(); const n=newCards(Math.max(0,(+ST.settings.dailyNew||20)-0));
   Cards.queue=d.concat(n); Cards.show=false;
@@ -1007,22 +1078,49 @@ Cards.draw=function(){
     <button class="btn bad" onclick="Cards.grade(1)">忘记</button>
     <button class="btn gray" onclick="Cards.grade(2)">困难</button>
     <button class="btn" onclick="Cards.grade(3)">良好</button>
-    <button class="btn ok" onclick="Cards.grade(4)">简单</button></div>`:""}`;
+    <button class="btn ok" onclick="Cards.grade(4)">简单</button></div>`:""}
+  ${ST.settings.srsMode==="eb"&&Cards.ebSchedule(c.id)?`<div class="muted" style="margin-top:10px">记忆曲线: ${Cards.ebSchedule(c.id).map(n=>`<span style="${n.done?'color:var(--ok)':n.next?'color:var(--pri);font-weight:600':'color:var(--tx2)'};margin-right:6px">${n.done?'✔':n.next?'▶':'○'}D+${n.day}</span>`).join("")}</div>`:""}`;
   renderMath(area);
 };
 Cards.flip=function(){ if(!Cards.cur)return; Cards.show=true; Cards.draw(); };
 Cards.grade=function(g){
   const c=Cards.cur; const now=Date.now();
-  let s=ST.srs[c.id]||{due:now,iv:0,ef:2.5,reps:0};
-  const q=[1,3,4,5][g-1];
-  if(q<3){ s.reps=0; s.iv=1; }
-  else{ s.reps++; s.iv=s.reps===1?1:s.reps===2?6:Math.round(s.iv*s.ef); s.ef=Math.max(1.3,s.ef+(0.1-(5-q)*0.08+(4-q)*0.02)); }
-  s.due=now+s.iv*864e5; s.last=now;
+  let s=ST.srs[c.id]||{due:now,iv:0,ef:2.5,reps:0,eb:0};
+  const wasNew=(s.reps||0)===0;
+  if(ST.settings.srsMode==="eb"){
+    // 艾宾浩斯固定节点: 评"记得"(>=3)推进到下一节点, 评"忘了"(<3)回退到首节点重学
+    if(g>=3){
+      s.eb=Math.min((s.eb||0)+1, EB.length);
+      const idx=Math.min(s.eb-1, EB.length-1);
+      s.due=now + EB[idx]*864e5;
+      s.reps=(s.reps||0)+1;
+      if(s.eb>=EB.length){ s.mastered=true; }
+    } else {
+      s.eb=0; s.due=now; s.reps=0;
+    }
+  } else {
+    const q=[1,3,4,5][g-1];
+    if(q<3){ s.reps=0; s.iv=1; }
+    else{ s.reps++; s.iv=s.reps===1?1:s.reps===2?6:Math.round(s.iv*s.ef); s.ef=Math.max(1.3,s.ef+(0.1-(5-q)*0.08+(4-q)*0.02)); }
+    s.due=now+s.iv*864e5; s.last=now;
+  }
   ST.srs[c.id]=s;
   const d=dkey(); d.cards++;
   Store.save("srs"); Store.save("daily");
   if(c.type==="wrong"){ /* 卡片掌握不动错题状态, 由错题本管理 */ }
+  if(wasNew){
+    if(ST.settings.srsMode==="eb"){
+      if(s.eb>=EB.length) toast("已掌握, 进入年度复习");
+      else toast("已加入复习: "+(EB[(s.eb-1)])+" 天后回顾");
+    } else toast("已加入复习队列 (SM-2 自适应)");
+  }
   Cards.next();
+};
+/* 当前卡片的艾宾浩斯复习节点进度(供记忆曲线面板展示) */
+Cards.ebSchedule=function(cardId){
+  const s=ST.srs[cardId]; if(!s||ST.settings.srsMode!=="eb") return null;
+  const done=Math.min(s.eb||0, EB.length);
+  return EB.map((d,i)=>({day:d,done:i<done,next:i===done&&!s.mastered}));
 };
 
 /* ================= 知识树 ================= */
@@ -1226,6 +1324,15 @@ const Wrong={
 function isWeekend(d){ const w=new Date(d||Date.now()).getDay(); return w===0||w===6; }
 function skipSet(){ const s=new Set(); for(const [k,v] of Object.entries(ST.settings.subjects||{})) if(v&&v.mode==="skip") s.add(k); return s; }
 function isSkipQ(q){ const sk=skipSet(); return sk.size? [...sk].some(x=>q.chapterId===x||q.chapterId.startsWith(x+"-")) : false; }
+/* 假期: ST.holidays=[{start,end,intensity}], 命中则返回 {start,end,intensity}; intensity 默认 0.4 */
+function isHoliday(dt){
+  dt=dt||today();
+  for(const h of (ST.holidays||[])){
+    if(h&&h.start&&h.end&&dt>=h.start&&dt<=h.end)
+      return {start:h.start,end:h.end,intensity:(h.intensity!=null?+h.intensity:0.4)};
+  }
+  return null;
+}
 function planCompute(){
   const days=ST.settings.examDate? Math.max(0,Math.ceil((new Date(ST.settings.examDate)-Date.now())/864e5)):null;
   const qs=allQ().filter(q=>q.stem&&q.options.length>=2&&!q.incomplete&&!q.duplicateOf);
@@ -1241,8 +1348,11 @@ function planCompute(){
   const mins=wknd?(+ST.settings.weekendMin||240):(+ST.settings.weekdayMin||90);
   const brushBase=Math.max(5,Math.round(mins/2.2));
   let brush=sprint?0:Math.min(200,Math.max(10,Math.min(brushBase,Math.ceil(unseen/Math.max(days||30,1)*factor))));
+  // 假期降强度: 命中假期则按 intensity 缩减当天额度
+  const hd=isHoliday(today()); const hdFactor=hd?(hd.intensity||0.4):1;
+  if(hdFactor<1) brush=Math.max(3,Math.round(brush*hdFactor));
   const due=dueCards().length;
-  return {days,unseen,factor,sprint,brush,due,wknd};
+  return {days,unseen,factor,sprint,brush,due,wknd,holiday:hd};
 }
 function renderPlanMini(box){
   const p=planCompute(); const d=dkey();
@@ -1259,6 +1369,7 @@ function renderPlanMini(box){
     <span class="grow" style="${t[1]?"text-decoration:line-through;color:var(--tx2)":""}">${t[0]}</span>
     <a href="#${t[2]}" style="color:var(--pri);font-size:12px">去完成</a></div>`).join("")}</div></div>
   ${p.sprint?'<div class="tag warn" style="margin-top:8px">冲刺模式: 距考试 ≤14 天, 只刷模考+错题+到期卡</div>':""}
+  ${p.holiday?`<div class="tag" style="margin-top:6px;background:rgba(155,89,182,.15);color:#8e44ad">假期模式: ${esc(p.holiday.start)}~${esc(p.holiday.end)} 强度降至 ${Math.round((p.holiday.intensity||0.4)*100)}%</div>`:""}
   ${p.factor!==1?`<div class="muted" style="margin-top:6px">自动调节: 近3天完成率${p.factor>1?"高, 配额已上浮 20%":"偏低, 配额已下调 20%"}</div>`:""}`;
 }
 function vPlan(){
@@ -1299,6 +1410,18 @@ function vPlan(){
     <div class="muted" style="margin-top:6px">类别路由: 理解型→工作日主攻, 记忆型→周末背诵, 综合型→工作日原理+周末综合; 权重越高, 排程题量越多。</div>
   </div>
 
+  <div class="card"><h2 style="font-size:14px">⑧ 假期与碎片 <span class="muted" style="font-size:11px">(假期自动降强度 · 碎片时间速刷)</span></h2>
+    <div id="plan-holidays"></div>
+    <div class="row" style="margin-top:8px;flex-wrap:wrap;align-items:center">
+      <label>假期起</label><input type="date" id="hd-start" style="width:140px">
+      <label>止</label><input type="date" id="hd-end" style="width:140px">
+      <label>强度</label><input type="number" id="hd-int" min="0.1" max="1" step="0.1" value="0.4" style="width:56px"><label>×</label>
+      <button class="btn sm" onclick="Plan.addHoliday()">添加假期</button>
+      <button class="btn sm ghost" onclick="Quick.fragment()">⚡ 碎片速刷(5题)</button>
+    </div>
+    <div class="muted" style="margin-top:6px">假期内的「今日任务」会按强度系数缩减额度；碎片速刷用于等车/排队等零碎时间, 随机抽 5 题保持手感。</div>
+  </div>
+
   <div class="card"><h2 style="font-size:14px">今日任务</h2><div id="plan-today"></div></div>
 
   <div class="card"><h2 style="font-size:14px">确定性规划 <span class="muted" style="font-size:11px">(离线可用 · 不依赖 AI)</span></h2>
@@ -1316,6 +1439,7 @@ function vPlan(){
       <button class="btn" onclick="Plan.aiGen(false)">${ST.aiPlan?"重新生成":"AI 生成学习计划"}</button>
       ${ST.aiPlan?'<button class="btn ghost" onclick="Plan.aiGen(true)">结合进度动态调整</button>':""}</div>
     <div id="ai-plan-out"></div></div>`;
+  Plan.renderHolidays();
   renderPlanMini($("#plan-today"));
   Plan.renderAi();
 }
@@ -1494,11 +1618,16 @@ async aiGen(adjust){
   const subj=this.subjects().filter(x=>x.mode!=="skip");
   const skipNames=this.subjects().filter(x=>x.mode==="skip").map(x=>x.title).join("、")||"无";
   const subjNames=subj.map(x=>x.title+"("+(x.cat==="calc"?"理解型·工作日":x.cat==="mem"?"记忆型·周末":"综合型·混合")+")").join("、");
+  const hds=(ST.holidays||[]).filter(h=>h&&h.start&&h.start>today()).sort((a,b)=>a.start<b.start?-1:1).slice(0,3);
+  const holidayLine = hds.length ? ("【假期安排】未来假期: "+hds.map(h=>h.start+"~"+h.end+"(强度"+Math.round((h.intensity!=null?+h.intensity:0.4)*100)+"%)").join("、")+"；假期请安排轻量复习(如每日碎片速刷+错题回顾), 不中断记忆曲线。") : "【假期安排】暂未设置假期；可在「学习计划 → ⑧ 假期与碎片」中添加, 假期额度会自动下调。";
   const prompt=`你是资深备考规划专家。请为以下考生输出一份完整、可直接执行的备考学习计划文档(Markdown)。
 【基本信息】考试: ${ST.settings.examName||"注册环保工程师基础考试"}；考试日期: ${ST.settings.examDate||"未设置"}；今天: ${today()}；工作日可学习: ${+ST.settings.weekdayMin||90}分钟、周末可学习: ${+ST.settings.weekendMin||240}分钟。
 【科目范围】纳入计划科目(共${subj.length}): ${subjNames}；已放弃科目: ${skipNames}。
 【每日目标折算】工作日约刷题${Math.round((+ST.settings.weekdayMin||90)/2.2)}题+新卡${Math.round((+ST.settings.weekdayMin||90)/6)}张；周末约刷题${Math.round((+ST.settings.weekendMin||240)/2.2)}题+新卡${Math.round((+ST.settings.weekendMin||240)/6)}张。
 【各章掌握情况】(章: 题量/已刷/正确率) ${statsLine}。
+${holidayLine}
+【周复盘机制】应用会每周自动统计「完成率(近7天实际题量÷目标×7)」与「正确率」, 并据此给下周建议；计划里请明确「每周末花 20 分钟做周复盘, 看完成率与正确率, 低于阈值则下调新内容量、回炉错题」。
+【模考建议】应用支持「自定义组卷 + 保存模考模板(可固定种子复现同一套卷)」, 计划里请安排每周末至少 1 套全真模考, 并说明如何用模考报告定位薄弱章。
 【输出结构】严格按以下标题结构输出, 每一节都必须写出具体、可执行的实质内容(具体到章节名/日期/天数/题量/正确率数字), 禁止留空、禁止只写括号里的提示语、禁止输出"略"或占位符:
 # 备考学习计划
 ## 一、总体概览
@@ -1584,6 +1713,39 @@ mdMini(src){
 },
 copyMd(){ navigator.clipboard.writeText((ST.aiPlan&&ST.aiPlan.md)||"").then(()=>toast("已复制计划全文")); },
 dlMd(){ download("beikao-plan-"+today().replace(/-/g,"")+".md",(ST.aiPlan&&ST.aiPlan.md)||"","text/markdown"); toast("已导出计划 .md"); }
+};
+/* 假期管理: 渲染 + 增删 */
+Plan.renderHolidays=function(){
+  const box=$("#plan-holidays"); if(!box) return;
+  const hs=ST.holidays||[];
+  if(!hs.length){ box.innerHTML='<div class="muted" style="font-size:12px">未设置假期。假期内的每日任务会按强度系数自动降额(默认 40%)。</div>'; return; }
+  box.innerHTML=hs.map((h,i)=>`<div class="list-row" style="padding:6px 0"><div class="grow">
+    <b>${esc(h.start)} ~ ${esc(h.end)}</b> <span class="muted">强度 ${Math.round((h.intensity!=null?+h.intensity:0.4)*100)}%</span>
+    ${isHoliday(h.start)?"":""}</div>
+    <button class="btn sm ghost" onclick="Plan.delHoliday(${i})">删除</button></div>`).join("");
+};
+Plan.addHoliday=function(){
+  const s=$("#hd-start").value, e=$("#hd-end").value, int=+$("#hd-int").value||0.4;
+  if(!s||!e){ toast("请填写假期起止日期"); return; }
+  if(s>e){ toast("起始日期不能晚于结束日期"); return; }
+  ST.holidays=ST.holidays||[];
+  ST.holidays.push({start:s,end:e,intensity:int}); ST.holidays.sort((a,b)=>a.start<b.start?-1:1);
+  Store.save("holidays"); this.renderHolidays(); vPlan===undefined?0:0;
+  toast("已添加假期 "+s+"~"+e);
+};
+Plan.delHoliday=function(i){ ST.holidays.splice(i,1); Store.save("holidays"); this.renderHolidays(); };
+
+/* 碎片速刷: 从当前/全局随机抽 5 题, 直接进入刷题, 适合零碎时间 */
+const Quick={
+  fragment(){
+    Brush.f={book:"",ch:"",mode:"rand",scope:"all",n:5};
+    location.hash="#brush";
+    setTimeout(()=>{ buildQueue(); if(Brush.queue.length) Brush.start(); else toast("题库暂无可选题目"); },80);
+  },
+  cards(){
+    location.hash="#cards";
+    setTimeout(()=>Cards.start(),80);
+  }
 };
 
 /* ================= 校对台 ================= */
@@ -2067,7 +2229,7 @@ const Settings={
     if(mode==="replace") SKEYS.forEach(k=>{ const def=ST_DEF[k];
       ST[k]= (def===undefined) ? (k==="exams"||k==="videos"?[]:{}) : JSON.parse(JSON.stringify(def)); });
     SKEYS.forEach(k=>{ if(body[k]!==undefined) ST[k]=body[k]; });
-    ST.settings=Object.assign({examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,weekdayMin:90,weekendMin:240,subjects:{},theme:"light",supabaseUrl:"",supabaseKey:""},ST.settings);
+    ST.settings=Object.assign({examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,supabaseUrl:"",supabaseKey:""},ST.settings);
     let addImp=0;
     if(imps.length){
       const cur=Imports.all(), names=new Set(cur.map(x=>x.name));
@@ -2337,7 +2499,7 @@ Lib.vidChap=function(cid){
 };
 
 /* ================= 路由 ================= */
-const ROUTES={home:vHome,brush:vBrush,exam:vExam,cards:vCards,tree:vTree,lib:vLib,wrong:vWrong,plan:vPlan,proof:vProof,stats:vStats,set:vSet,fish:vFish};
+const ROUTES={home:vHome,brush:vBrush,exam:vExam,cards:vCards,tree:vTree,lib:vLib,wrong:vWrong,plan:vPlan,weekly:vWeekly,proof:vProof,stats:vStats,set:vSet,fish:vFish};
 function route(){
   const r=(location.hash.slice(1)||"home").split("?")[0];
   $("#side").style.display=""; $("#main").style.marginLeft=""; $("#main").style.padding="";
@@ -2393,6 +2555,68 @@ const Imports={
     list.forEach(x=>{ if(x&&x.name&&!names.has(x.name)){ cur.push(x); names.add(x.name); added++; } });
     if(added) this._save(cur); return added; }
 };
+
+/* ================= 周复盘 ================= */
+/* 近 7 天完成率 / 正确率 / 闪卡 / 模考 → 给出下周动态调整建议 */
+const WeeklyReview={
+  compute(){
+    const days=[]; for(let i=6;i>=0;i--){ const dt=new Date(Date.now()-i*864e5).toISOString().slice(0,10);
+      days.push({dt,d:ST.daily[dt]||{b:0,ok:0,cards:0}}); }
+    const target=+ST.settings.dailyBrush||50;
+    const studied=days.filter(x=>x.d.b>0).length;
+    const totalB=days.reduce((a,x)=>a+x.d.b,0);
+    const ideal=target*7;
+    const compRate=ideal?Math.round(totalB/ideal*100):0;
+    const totalOk=days.reduce((a,x)=>a+x.d.ok,0);
+    const acc=totalB?Math.round(totalOk/totalB*100):null;
+    const cards=days.reduce((a,x)=>a+x.d.cards,0);
+    const dts=new Set(days.map(x=>x.dt));
+    const exams=ST.exams.filter(e=>{ const dd=(e.date||"").slice(0,10); return dts.has(dd); }).length;
+    const sug=[];
+    if(compRate>=90) sug.push("本周完成率优秀, 可维持节奏, 或小幅加量冲击薄弱章节。");
+    else if(compRate<50) sug.push("完成率偏低, 建议用番茄钟固定每日学习时段, 先保证基础题量达标。");
+    else sug.push("完成率中等, 下周目标把每日题量补到目标的 80% 以上。");
+    if(acc!==null){ if(acc<60) sug.push("正确率低于 60%, 优先用「刷本章」回炉薄弱章节, 别急着赶进度。");
+      else if(acc<75) sug.push("正确率尚可, 错题本集中清一遍即可。");
+      else sug.push("正确率稳定, 可进入提速 / 模考阶段。"); }
+    if(exams===0) sug.push("本周未做模考, 建议周末安排 1 套全真模考检验水平。");
+    else sug.push("本周已完成 "+exams+" 套模考, 据报告里低分章节优先补强。");
+    return {days,target,studied,totalB,ideal,compRate,totalOk,acc,cards,exams,sug};
+  }
+};
+function vWeekly(){
+  const el=$("#main"); const r=WeeklyReview.compute();
+  const bars=r.days.map(x=>{ const pct=r.target?Math.min(100,Math.round(x.d.b/r.target*100)):0;
+    const col=pct>=80?"var(--ok)":pct>=40?"var(--warn)":"var(--bad)";
+    return `<div class="row" style="margin:3px 0;gap:8px">
+      <span class="muted" style="width:46px">${x.dt.slice(5)}</span>
+      <div class="bar grow"><i style="width:${pct}%;background:${col}"></i></div>
+      <span class="muted" style="width:120px;text-align:right">${x.d.b}题 · ${x.d.ok?Math.round(x.d.ok/x.d.b*100):0}%对 · ${x.d.cards}卡</span></div>`;}).join("");
+  el.innerHTML=`<h2>周复盘 <span class="muted" style="font-size:12px">近 7 天</span></h2>
+  <div class="card"><div class="kv">
+    <div class="item"><div class="muted">学习天数</div><div class="num">${r.studied} / 7</div></div>
+    <div class="item"><div class="muted">完成率</div><div class="num">${r.compRate}%</div></div>
+    <div class="item"><div class="muted">总题量</div><div class="num">${r.totalB}</div></div>
+    <div class="item"><div class="muted">正确率</div><div class="num">${r.acc!=null?r.acc+"%":"—"}</div></div>
+    <div class="item"><div class="muted">复习卡</div><div class="num">${r.cards}</div></div>
+    <div class="item"><div class="muted">模考</div><div class="num">${r.exams}</div></div>
+  </div>
+  <div style="margin-top:12px"><b class="muted" style="font-size:12px">每日题量 (目标 ${r.target}/天)</b>${bars}</div></div>
+  <div class="card"><h2 style="font-size:14px">下周动态调整建议</h2>
+    ${r.sug.map(s=>`<div class="row" style="margin:6px 0"><span class="muted">▸</span><span style="font-size:13.5px">${esc(s)}</span></div>`).join("")}
+    <div class="muted" style="margin-top:8px">完成率 = 近7天实际题量 ÷ (目标×7)；正确率 = 近7天做对 ÷ 已做。规律复习比突击更重要。</div></div>`;
+}
+/* 首页周复盘卡片 */
+function renderWeekly(box){
+  if(!box) return;
+  const r=WeeklyReview.compute();
+  box.innerHTML=`<div class="kv">
+    <div class="item"><div class="muted">完成率</div><div class="num">${r.compRate}%</div></div>
+    <div class="item"><div class="muted">正确率</div><div class="num">${r.acc!=null?r.acc+"%":"—"}</div></div>
+    <div class="item"><div class="muted">学习</div><div class="num">${r.studied}/7天</div></div>
+    <div class="item"><div class="muted">模考</div><div class="num">${r.exams}</div></div></div>
+  <div class="muted" style="margin-top:6px;font-size:12.5px">${esc(r.sug[0]||"保持节奏")} <a href="#weekly" style="color:var(--pri)">查看周复盘</a></div>`;
+}
 
 /* ================= 启动 ================= */
 (async function(){
