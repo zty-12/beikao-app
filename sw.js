@@ -16,7 +16,8 @@ self.addEventListener("fetch", e => {
   const req = e.request;
   if (req.method !== "GET") return;
   const url = new URL(req.url);
-  if (url.origin !== location.origin) return;   // CDN (KaTeX 等) 不代理, 保持直连
+  if (url.origin !== location.origin) return;   // 跨域(如 Supabase ESM)不代理, 保持直连
+  // KaTeX 等静态资源现已本地化(vendor/), 同源 GET 走 network-first + 被动缓存, 离线可用
   // 大体积整页原图不缓存 (raw_pages*), 其他同源资源 network-first + 被动缓存
   const isHugePageImg = /\/data\/raw_pages[^/]*\//.test(url.pathname);
   e.respondWith((async () => {
