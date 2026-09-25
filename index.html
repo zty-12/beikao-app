@@ -197,10 +197,10 @@ function bookOfCh(cid){ if(!cid) return null;
 /* ================= 本地存储 (IndexedDB + localStorage 兜底) ================= */
 const ST = {progress:{}, srs:{}, settings:{examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,
   weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,targetScore:132,subjMigrated:false,
-  supabaseUrl:"",supabaseKey:""}, plan:{}, exams:[], examTemplates:[], holidays:[], syllabus:[], taskDays:{},
+  supabaseUrl:"",supabaseKey:""}, plan:{}, exams:[], examTemplates:[], holidays:[], syllabus:[], taskDays:{}, holidayCache:{},
   overrides:{}, daily:{}, lib:{read:{},time:{},excerpts:[]}};
 const SKEYS=["progress","srs","settings","plan","exams","overrides","daily","lib","videos","aiPlan",
-  "examTemplates","holidays","syllabus","taskDays"];
+  "examTemplates","holidays","syllabus","taskDays","holidayCache"];
 const ST_DEF=JSON.parse(JSON.stringify(ST));   // 出厂默认值快照, 供「全量覆盖导入」复位
 let _mem={};
 const Store={
@@ -1500,12 +1500,12 @@ function vPlan(){
     <div class="muted" style="margin-top:6px">按约 2.2 分钟/题、6 分钟/新卡 折算 → 工作日约 <b>${brushW} 题 + ${newW} 新卡</b> / 天；周末约 <b>${brushE} 题 + ${newE} 新卡</b> / 天。③ 中可调整各科目权重微调分配。</div>
   </div>
 
-  <div class="card"><h2 style="font-size:14px">③ 科目与范围 <span class="muted" style="font-size:11px">(考纲15科 · 类别/状态/考纲题量可手改, 放弃的科目退出计划与今日任务)</span></h2>
+  <div class="card"><h2 style="font-size:14px">③ 科目与范围 <span class="muted" style="font-size:11px">(考纲17科 · 类别/状态/考纲题量可手改, 放弃的科目退出计划与今日任务)</span></h2>
     <div class="row" style="margin-top:6px;flex-wrap:wrap;align-items:center">
       <button class="btn sm" onclick="Plan.addSubj()">＋ 添加科目</button>
       <button class="btn sm ghost" onclick="Plan.toggleSyllabusImport()">导入考纲…</button>
       <button class="btn sm ghost" onclick="Plan.restoreSyllabus()">恢复内置考纲</button>
-      <span class="muted" style="font-size:11.5px">· 内置注册环保基础考试考纲 15 科(公共基础120题×1分 + 专业基础60题×2分), 题库章节已自动映射</span>
+      <span class="muted" style="font-size:11.5px">· 内置注册环保基础考试考纲 17 科(公共基础11科120题×1分 + 专业基础6科60题×2分), 题库章节已自动映射</span>
     </div>
     <div id="syllabus-import-box" style="display:none;margin-top:8px;border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:8px">
       <textarea id="syllabus-import" rows="5" placeholder="每行一个科目, 如:&#10;数学基础 24&#10;1. 物理基础 12题&#10;我的自定义科目 30" style="width:100%"></textarea>
@@ -1526,7 +1526,7 @@ function vPlan(){
       <label>止</label><input type="date" id="hd-end" style="width:140px">
       <label>强度</label><input type="number" id="hd-int" min="0.1" max="1" step="0.1" value="0.4" style="width:56px"><label>×</label>
       <button class="btn sm" onclick="Plan.addHoliday()">添加假期</button>
-      <button class="btn sm ghost" onclick="Plan.autoHolidays()">一键填充公共假期(26-27年)</button>
+      <button class="btn sm ghost" onclick="Plan.autoHolidays()">一键获取公共假期(按年自动在线获取)</button>
       <button class="btn sm ghost" onclick="Quick.fragment()">⚡ 碎片速刷(5题)</button>
     </div>
     <div class="muted" style="margin-top:6px">假期内的「今日任务」会按强度系数缩减额度；碎片速刷用于等车/排队等零碎时间, 随机抽 5 题保持手感。</div>
@@ -1575,7 +1575,7 @@ const Plan={save(){
   ST.settings.dailyNew=Math.round((Math.round(ST.settings.weekdayMin/6)+Math.round(ST.settings.weekendMin/6))/2);
   Store.save("settings"); vPlan(); toast("计划已更新");
 },
-/* 科目清单: 以考纲科目表为准(默认内置15科), 合并用户覆盖(类别/状态/权重); 题库章节映射其上统计进度 */
+/* 科目清单: 以考纲科目表为准(默认内置17科), 合并用户覆盖(类别/状态/权重); 题库章节映射其上统计进度 */
 syllabus(){ return (Array.isArray(ST.syllabus)&&ST.syllabus.length)?ST.syllabus:SYLLABUS_PRESET; },
 migrateSubj(){   // 旧版按章节id的覆盖(a1等)一次性迁移到考纲科目id
   if(ST.settings.subjMigrated) return;
@@ -1608,11 +1608,11 @@ subjects(){
 _subjRows(){ return this.subjects().map(x=>{const ov=(ST.settings.subjects||{})[x.id]||{}; return `<tr>
   <td style="padding:4px 6px;white-space:nowrap">${esc(x.title)}${x.custom?' <span class="tag warn" style="font-size:10px">自定义</span>':""}</td>
   <td style="text-align:center;white-space:nowrap"><span class="tag" style="font-size:10.5px">${esc(x.group)}</span></td>
-  <td style="text-align:center"><input type="number" min="0" value="${x.examCount}" style="width:48px" onchange="Plan.setExamCount('${x.id}',this.value)" title="考纲题量"></td>
+  <td style="text-align:center"><input type="number" min="0" value="${x.examCount}" style="width:64px" onchange="Plan.setExamCount('${x.id}',this.value)" title="考纲题量"></td>
   <td style="text-align:center"><select onchange="Plan.setCat('${x.id}',this.value)">${["calc","mem","mix"].map(c=>`<option value="${c}" ${(ov.cat||x.cat)===c?"selected":""}>${c==="calc"?"理解·工作日":c==="mem"?"记忆·周末":"综合·混合"}</option>`).join("")}</select></td>
   <td style="text-align:center"><select onchange="Plan.setMode('${x.id}',this.value)">${["normal","low","skip"].map(m=>`<option value="${m}" ${(ov.mode||x.mode)===m?"selected":""}>${m==="normal"?"正常":m==="low"?"低优先":"放弃"}</option>`).join("")}</select></td>
   <td style="text-align:center">${x.qTotal}</td><td style="text-align:center">${x.qDone}</td><td style="text-align:center">${x.qAcc}%</td>
-  <td style="text-align:center"><input type="number" step="0.1" value="${ov.weight!=null?ov.weight:x.weight}" style="width:52px" onchange="Plan.setWeight('${x.id}',this.value)"></td>
+  <td style="text-align:center"><input type="number" step="0.1" value="${ov.weight!=null?ov.weight:x.weight}" style="width:64px" onchange="Plan.setWeight('${x.id}',this.value)"></td>
   <td style="text-align:center">${x.custom?`<button class="btn sm ghost" onclick="Plan.delSubj('${x.id}')">删除</button>`:""}</td></tr>`;}).join(""); },
 _refreshSubj(){ const tb=$("#plan-subj-body"); if(tb) tb.innerHTML=this._subjRows(); },
 setCat(id,v){ (ST.settings.subjects=ST.settings.subjects||{})[id]=Object.assign({},ST.settings.subjects[id],{cat:v}); Store.save("settings"); this._refreshSubj(); },
@@ -1627,7 +1627,7 @@ addSubj(){ const name=prompt("新增科目名称:"); if(!name||!name.trim()) ret
   ST.syllabus=l; Store.save("syllabus"); this._refreshSubj(); toast("已添加科目「"+name.trim()+"」(未关联题库章节, 仅用于计划与模考组成)"); },
 delSubj(id){ if(!confirm("删除该自定义科目?")) return;
   ST.syllabus=this.syllabus().filter(s=>s.id!==id); Store.save("syllabus"); this._refreshSubj(); toast("已删除"); },
-restoreSyllabus(){ ST.syllabus=[]; Store.save("syllabus"); this._refreshSubj(); toast("已恢复内置考纲 15 科"); },
+restoreSyllabus(){ ST.syllabus=[]; Store.save("syllabus"); this._refreshSubj(); toast("已恢复内置考纲 17 科"); },
 /* 粘贴考纲文本导入: 每行「科目名 24」或「1. 科目名 24题」; 名称匹配到现有科目则更新题量, 否则新增自定义科目 */
 toggleSyllabusImport(){ const box=$("#syllabus-import-box"); if(box) box.style.display=box.style.display==="none"?"block":"none"; },
 importSyllabus(){
@@ -2023,16 +2023,57 @@ Plan.renderHolidays=function(){
     <button class="btn sm ghost" onclick="Plan.delHoliday(${i})">删除</button></div>`).join("");
 };
 /* 一键填充中国公共假期: 2026 为国办官方安排, 2027 按新办法推算; 与已有假期重叠的自动跳过 */
-Plan.autoHolidays=function(){
-  ST.holidays=ST.holidays||[];
-  let added=0;
-  for(const h of CN_HOLIDAYS){
-    if(ST.holidays.some(x=>x.start<=h.e&&x.end>=h.s)) continue;
-    ST.holidays.push({start:h.s,end:h.e,intensity:0.4,name:h.n}); added++;
+/* 合并 holiday-cn 的逐日数据为连续区间(同名相邻日合并) */
+function mergeHolidayDays(days){
+  const off=(days||[]).filter(d=>d&&d.isOffDay&&d.date).map(d=>({name:String(d.name||"假期").replace(/\(推算.*/,""),date:d.date}))
+    .sort((a,b)=>a.date<b.date?-1:1);
+  const out=[];
+  for(const d of off){
+    const last=out[out.length-1];
+    const nxt=last?new Date(new Date(last.end+"T00:00:00").getTime()+864e5).toISOString().slice(0,10):null;
+    if(last&&last.name===d.name&&last.end===nxt) last.end=d.date;
+    else out.push({name:d.name,start:d.date,end:d.date});
+  }
+  return out;
+}
+/* 假期自动获取: 当前年→考试年逐年在线拉取(holiday-cn 数据, jsDelivr 双源), 失败回退内置表;
+   已过滤过去的假期; 有缓存/已覆盖的年份不重复请求 */
+Plan.autoHolidays=async function(){
+  ST.holidays=ST.holidays||[]; ST.holidayCache=ST.holidayCache||{};
+  const today0=today();
+  // 清理已结束的自动假期(手动添加的无 name 标记, 保留)
+  ST.holidays=ST.holidays.filter(h=>!(h.name&&h.end<today0));
+  const y0=new Date().getFullYear();
+  const y1=ST.settings.examDate?Math.max(y0,new Date(ST.settings.examDate+"T00:00:00").getFullYear()):y0+1;
+  let fetched=0; const failed=[];
+  for(let y=y0;y<=y1;y++){
+    if(ST.holidays.some(h=>h.start<=y+"-12-31"&&h.end>=y+"-01-01")) continue;   // 该年已覆盖
+    let ranges=ST.holidayCache[y]||null;
+    if(!ranges){
+      for(const src of ["https://cdn.jsdelivr.net/gh/NateScarlett/holiday-cn@master/"+y+".json",
+                        "https://fastly.jsdelivr.net/gh/NateScarlett/holiday-cn@master/"+y+".json"]){
+        try{
+          const r=await fetch(src,{cache:"no-store"}); if(!r.ok) throw new Error(r.status);
+          ranges=mergeHolidayDays((await r.json()).days);
+          ST.holidayCache[y]=ranges; fetched++;
+          break;
+        }catch(e){ /* 换下一个源 */ }
+      }
+      if(!ranges){   // 在线失败 → 内置表兜底
+        const blt=CN_HOLIDAYS.filter(h=>h.s.startsWith(String(y))).map(h=>({name:h.n,start:h.s,end:h.e}));
+        if(blt.length) ranges=blt; else failed.push(y);
+      }
+    }
+    for(const rg of (ranges||[])){
+      if(rg.end<today0) continue;                                                 // 已过去不添加
+      if(ST.holidays.some(x=>x.start<=rg.end&&x.end>=rg.start)) continue;         // 区间去重
+      ST.holidays.push({start:rg.start,end:rg.end,intensity:0.4,name:rg.name});
+    }
   }
   ST.holidays.sort((a,b)=>a.start<b.start?-1:1);
-  Store.save("holidays"); this.renderHolidays();
-  toast(added?("已填充 "+added+" 个公共假期 (2027 为推算, 以官方通知为准)"):"公共假期已存在, 无需重复添加");
+  Store.save("holidays"); Store.save("holidayCache"); this.renderHolidays();
+  if(failed.length) toast("已尽力填充; "+failed.join("/")+" 年暂无官方数据, 官方公布后再点一次即可");
+  else toast(fetched?("已自动获取 "+fetched+" 年公共假期 (已过滤已过日期)"):"公共假期已是最新, 无需更新");
 };
 Plan.addHoliday=function(){
   const s=$("#hd-start").value, e=$("#hd-end").value, int=+$("#hd-int").value||0.4;
