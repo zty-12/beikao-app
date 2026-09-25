@@ -195,7 +195,8 @@ function bookOfCh(cid){ if(!cid) return null;
   return null; }
 
 /* ================= 本地存储 (IndexedDB + localStorage 兜底) ================= */
-const ST = {progress:{}, srs:{}, settings:{examDate:"",dailyNew:20,dailyBrush:50,theme:"light",
+const ST = {progress:{}, srs:{}, settings:{examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,
+  weekdayMin:90,weekendMin:240,subjects:{},theme:"light",
   supabaseUrl:"",supabaseKey:""}, plan:{}, exams:[], overrides:{}, daily:{},
   lib:{read:{},time:{},excerpts:[]}};
 const SKEYS=["progress","srs","settings","plan","exams","overrides","daily","lib","videos","aiPlan"];
@@ -216,7 +217,7 @@ const Store={
       })));
     }catch(e){ Store.db=null; SKEYS.forEach(k=>{_mem[k]=localStorage.getItem("bk_"+k);}); }
     SKEYS.forEach(k=>{ if(_mem[k]) try{ST[k]=JSON.parse(_mem[k]);}catch(_){} });
-    ST.settings=Object.assign({examDate:"",dailyNew:20,dailyBrush:50,theme:"light",supabaseUrl:"",supabaseKey:""},ST.settings);
+    ST.settings=Object.assign({examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,weekdayMin:90,weekendMin:240,subjects:{},theme:"light",supabaseUrl:"",supabaseKey:""},ST.settings);
   },
   db:null,
   async save(k){
@@ -1222,19 +1223,26 @@ const Wrong={
 };
 
 /* ================= 学习计划 ================= */
+function isWeekend(d){ const w=new Date(d||Date.now()).getDay(); return w===0||w===6; }
+function skipSet(){ const s=new Set(); for(const [k,v] of Object.entries(ST.settings.subjects||{})) if(v&&v.mode==="skip") s.add(k); return s; }
+function isSkipQ(q){ const sk=skipSet(); return sk.size? [...sk].some(x=>q.chapterId===x||q.chapterId.startsWith(x+"-")) : false; }
 function planCompute(){
   const days=ST.settings.examDate? Math.max(0,Math.ceil((new Date(ST.settings.examDate)-Date.now())/864e5)):null;
   const qs=allQ().filter(q=>q.stem&&q.options.length>=2&&!q.incomplete&&!q.duplicateOf);
-  const unseen=qs.filter(q=>prog(q.id).a===0).length;
+  const studyQs=qs.filter(q=>!isSkipQ(q));
+  const unseen=studyQs.filter(q=>prog(q.id).a===0).length;
   // 近3天完成率 -> 调节系数
   let factor=1; const hist=[];
-  for(let i=1;i<=3;i++){ const dt=new Date(Date.now()-i*864e5).toISOString().slice(0,10); const d=ST.daily[dt]; if(d)hist.push(d.b>=ST.settings.dailyBrush*0.8); }
+  for(let i=1;i<=3;i++){ const dt=new Date(Date.now()-i*864e5).toISOString().slice(0,10); const d=ST.daily[dt]; if(d)hist.push(d.b>=(ST.settings.dailyBrush||50)*0.8); }
   if(hist.length>=2){ const r=hist.filter(Boolean).length/hist.length; factor=r>=0.9?1.2:r>=0.5?1:0.8; }
   const sprint=days!==null&&days<=14;
-  let brush=sprint?Math.min(unseen,30):Math.min(200,Math.max(10,Math.ceil(unseen/Math.max(days||30,1)*factor)));
-  if(sprint) brush=0;
+  // 按当日类型(工作日/周末)由分钟折算每日刷题目标
+  const wknd=isWeekend(new Date());
+  const mins=wknd?(+ST.settings.weekendMin||240):(+ST.settings.weekdayMin||90);
+  const brushBase=Math.max(5,Math.round(mins/2.2));
+  let brush=sprint?0:Math.min(200,Math.max(10,Math.min(brushBase,Math.ceil(unseen/Math.max(days||30,1)*factor))));
   const due=dueCards().length;
-  return {days,unseen,factor,sprint,brush,due};
+  return {days,unseen,factor,sprint,brush,due,wknd};
 }
 function renderPlanMini(box){
   const p=planCompute(); const d=dkey();
@@ -1254,25 +1262,57 @@ function renderPlanMini(box){
   ${p.factor!==1?`<div class="muted" style="margin-top:6px">自动调节: 近3天完成率${p.factor>1?"高, 配额已上浮 20%":"偏低, 配额已下调 20%"}</div>`:""}`;
 }
 function vPlan(){
+  const s=ST.settings;
+  const wkMin=+s.weekdayMin||90, weMin=+s.weekendMin||240;
+  const brushW=Math.max(5,Math.round(wkMin/2.2)), brushE=Math.max(5,Math.round(weMin/2.2));
+  const newW=Math.max(0,Math.round(wkMin/6)), newE=Math.max(0,Math.round(weMin/6));
+  const isPreset=["注册环保工程师·基础考试","注册环保工程师·专业考试"].includes(s.examName);
   $("#main").innerHTML=`<h2>学习计划</h2>
-  <div class="card"><div class="row">
-    <label>考试日期</label><input type="date" id="plan-date" value="${ST.settings.examDate}">
-    <label>每日刷题目标</label><input type="number" id="plan-brush" value="${ST.settings.dailyBrush}" style="width:80px">
-    <label>每日新卡</label><input type="number" id="plan-new" value="${ST.settings.dailyNew}" style="width:80px">
-    <button class="btn" onclick="Plan.save()">保存</button></div>
-    <div class="muted" style="margin-top:8px">配额 = 剩余题量 ÷ 剩余天数 × 近3天完成率系数(0.8/1.0/1.2); 距考试≤14天自动进入冲刺模式。</div></div>
+
+  <div class="card"><h2 style="font-size:14px">① 考试信息</h2>
+    <div class="row" style="flex-wrap:wrap;margin-top:6px">
+      <label>考试名称</label>
+      <select id="plan-exam" onchange="Plan.onExamChange()">
+        ${["注册环保工程师·基础考试","注册环保工程师·专业考试","自定义"].map(o=>`<option ${s.examName===o?"selected":""}>${o}</option>`).join("")}
+      </select>
+      <input id="plan-exam-custom" placeholder="自定义考试名" value="${isPreset?"":esc(s.examName||"")}" style="width:160px;display:${isPreset?"none":"inline-block"}">
+      <label>考试日期</label><input type="date" id="plan-date" value="${s.examDate}">
+      <button class="btn" onclick="Plan.save()">保存</button>
+    </div>
+    <div class="muted" style="margin-top:6px" id="plan-exam-hint">${Plan.examHint()}</div>
+  </div>
+
+  <div class="card"><h2 style="font-size:14px">② 时间预算 (工作日 / 周末分开)</h2>
+    <div class="row" style="flex-wrap:wrap;margin-top:6px">
+      <label>工作日可学习</label><input type="number" id="plan-wkd" value="${wkMin}" style="width:70px"><label>分钟</label>
+      <label>周末可学习</label><input type="number" id="plan-wke" value="${weMin}" style="width:70px"><label>分钟</label>
+      <span class="tag">每周合计 ${wkMin*5+weMin*2} 分钟</span>
+    </div>
+    <div class="muted" style="margin-top:6px">按约 2.2 分钟/题、6 分钟/新卡 折算 → 工作日约 <b>${brushW} 题 + ${newW} 新卡</b> / 天；周末约 <b>${brushE} 题 + ${newE} 新卡</b> / 天。③ 中可调整各科目权重微调分配。</div>
+  </div>
+
+  <div class="card"><h2 style="font-size:14px">③ 科目与范围 <span class="muted" style="font-size:11px">(类别/状态可手改, 放弃的科目退出计划与今日任务)</span></h2>
+    <div style="overflow-x:auto;margin-top:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px">
+      <thead><tr style="color:var(--tx2)"><th style="text-align:left;padding:4px 6px">科目</th><th>类别</th><th>状态</th><th>题量</th><th>已刷</th><th>正确率</th><th>权重</th></tr></thead>
+      <tbody id="plan-subj-body">${Plan._subjRows()}</tbody>
+    </table></div>
+    <div class="muted" style="margin-top:6px">类别路由: 理解型→工作日主攻, 记忆型→周末背诵, 综合型→工作日原理+周末综合; 权重越高, 排程题量越多。</div>
+  </div>
+
   <div class="card"><h2 style="font-size:14px">今日任务</h2><div id="plan-today"></div></div>
+
   <div class="card"><h2 style="font-size:14px">确定性规划 <span class="muted" style="font-size:11px">(离线可用 · 不依赖 AI)</span></h2>
     <div class="row" style="margin-top:8px;flex-wrap:wrap">
-      <label>周末强度系数</label><input type="number" id="plan-wk" step="0.1" value="${ST.settings.weekendFactor||1.5}" style="width:60px"><label>×</label>
-      <label>番茄钟</label><input type="number" id="plan-pomo" value="${ST.settings.pomo||25}" style="width:60px"><label>分钟</label>
+      <label>周末强度系数</label><input type="number" id="plan-wk" step="0.1" value="${s.weekendFactor||1.5}" style="width:60px"><label>×</label>
+      <label>番茄钟</label><input type="number" id="plan-pomo" value="${s.pomo||25}" style="width:60px"><label>分钟</label>
       <button class="btn" onclick="Plan.gen()">生成确定性计划</button>
       <button class="btn ghost" onclick="Plan.pomoStart()">🍅 开始专注</button></div>
     <div id="pomo-box" class="muted" style="margin-top:6px"></div>
     <div id="det-plan-out"></div></div>
+
   <div class="card"><h2 style="font-size:14px">AI 智能规划 <span class="muted" style="font-size:11px">(需先在设置里配置 AI 接口)</span></h2>
     <div class="row" style="margin-top:8px;flex-wrap:wrap">
-      <label>每日可学习</label><input type="number" id="ai-min" value="120" style="width:70px"><label>分钟</label>
+      <label>每日可学习</label><input type="number" id="ai-min" value="${Math.max(wkMin,weMin)}" style="width:70px"><label>分钟</label>
       <button class="btn" onclick="Plan.aiGen(false)">${ST.aiPlan?"重新生成":"AI 生成学习计划"}</button>
       ${ST.aiPlan?'<button class="btn ghost" onclick="Plan.aiGen(true)">结合进度动态调整</button>':""}</div>
     <div id="ai-plan-out"></div></div>`;
@@ -1280,47 +1320,133 @@ function vPlan(){
   Plan.renderAi();
 }
 const Plan={save(){
+  const sel=$("#plan-exam"); const ci=$("#plan-exam-custom");
+  ST.settings.examName = sel.value==="自定义"? (ci.value.trim()||"自定义考试") : sel.value;
   ST.settings.examDate=$("#plan-date").value;
-  ST.settings.dailyBrush=+$("#plan-brush").value||50;
-  ST.settings.dailyNew=+$("#plan-new").value||20;
+  ST.settings.weekdayMin=+$("#plan-wkd").value||90;
+  ST.settings.weekendMin=+$("#plan-wke").value||240;
   const wk=$("#plan-wk"); if(wk) ST.settings.weekendFactor=+wk.value||1.5;
   const pm=$("#plan-pomo"); if(pm) ST.settings.pomo=+pm.value||25;
+  // 折算并维护旧字段(兼容首页"今日已刷"显示)
+  ST.settings.dailyBrush=Math.round((Math.round(ST.settings.weekdayMin/2.2)+Math.round(ST.settings.weekendMin/2.2))/2);
+  ST.settings.dailyNew=Math.round((Math.round(ST.settings.weekdayMin/6)+Math.round(ST.settings.weekendMin/6))/2);
   Store.save("settings"); vPlan(); toast("计划已更新");
 },
+/* 科目清单: 从题库顶级章节自动生成, 合并用户覆盖(类别/状态/权重) */
+subjects(){
+  const map=ST.settings.subjects||{};
+  const list=[];
+  for(const c of (BANK.chapters||[])){
+    const bookId=(c.id||"?").slice(0,1).toUpperCase();
+    const qs=allQ().filter(q=>q.chapterId===c.id||q.chapterId.startsWith(c.id+"-"));
+    const dn=qs.filter(q=>prog(q.id).a>0);
+    const ok=dn.filter(q=>prog(q.id).c>prog(q.id).w).length;
+    const ov=map[c.id]||{};
+    const cat=ov.cat||(bookId==="A"?"calc":bookId==="B"?"mem":"mix");
+    const weight=ov.weight!=null?+ov.weight:(cat==="calc"?1.2:cat==="mem"?1.0:1.1);
+    list.push({id:c.id,title:c.title,bookId,cat,mode:ov.mode||"normal",weight,
+      qTotal:qs.length,qDone:dn.length,qAcc:dn.length?Math.round(ok/dn.length*100):0});
+  }
+  return list;
+},
+_subjRows(){ return this.subjects().map(x=>{const ov=(ST.settings.subjects||{})[x.id]||{}; return `<tr>
+  <td style="padding:4px 6px">${esc(x.title)}</td>
+  <td style="text-align:center"><select onchange="Plan.setCat('${x.id}',this.value)">${["calc","mem","mix"].map(c=>`<option value="${c}" ${(ov.cat||x.cat)===c?"selected":""}>${c==="calc"?"理解·工作日":c==="mem"?"记忆·周末":"综合·混合"}</option>`).join("")}</select></td>
+  <td style="text-align:center"><select onchange="Plan.setMode('${x.id}',this.value)">${["normal","low","skip"].map(m=>`<option value="${m}" ${(ov.mode||x.mode)===m?"selected":""}>${m==="normal"?"正常":m==="low"?"低优先":"放弃"}</option>`).join("")}</select></td>
+  <td style="text-align:center">${x.qTotal}</td><td style="text-align:center">${x.qDone}</td><td style="text-align:center">${x.qAcc}%</td>
+  <td style="text-align:center"><input type="number" step="0.1" value="${ov.weight!=null?ov.weight:x.weight}" style="width:46px" onchange="Plan.setWeight('${x.id}',this.value)"></td></tr>`;}).join(""); },
+_refreshSubj(){ const tb=$("#plan-subj-body"); if(tb) tb.innerHTML=this._subjRows(); },
+setCat(id,v){ (ST.settings.subjects=ST.settings.subjects||{})[id]=Object.assign({},ST.settings.subjects[id],{cat:v}); Store.save("settings"); this._refreshSubj(); },
+setMode(id,v){ (ST.settings.subjects=ST.settings.subjects||{})[id]=Object.assign({},ST.settings.subjects[id],{mode:v}); Store.save("settings"); this._refreshSubj(); },
+setWeight(id,v){ (ST.settings.subjects=ST.settings.subjects||{})[id]=Object.assign({},ST.settings.subjects[id],{weight:+v||1}); Store.save("settings"); this._refreshSubj(); },
+examHint(){
+  const n=ST.settings.examName||"";
+  if(n.indexOf("基础考试")>=0) return "注册环保工程师基础考试: 上午场 公共基础(高等数学/物理/化学/力学/电工/计算机/工程经济等 15 章), 下午场 专业基础(流体力学/微生物/监测/评价/污染防治/职业法规等)。";
+  if(n.indexOf("专业考试")>=0) return "注册环保工程师专业考试: 专业知识 + 专业案例两日, 侧重案例计算。";
+  return "自定义考试, 请根据实际考纲在 ③ 中调整科目范围与每日时长。";
+},
+onExamChange(){ const sel=$("#plan-exam"); const ci=$("#plan-exam-custom");
+  if(sel.value==="自定义"){ ci.style.display="inline-block"; ci.focus(); }
+  else { ci.style.display="none"; ci.value=""; ST.settings.examName=sel.value; const h=$("#plan-exam-hint"); if(h)h.innerHTML=this.examHint(); } },
 gen(){
-  const s=ST.settings;
+  const s=ST.settings; const today0=today();
   const examDate=s.examDate||"";
-  const today0=today();
   const days = examDate? Math.max(0, Math.ceil((new Date(examDate)-Date.now())/864e5)) : 90;
   const qs=allQ().filter(q=>q.stem&&q.options&&q.options.length>=2&&!q.incomplete&&!q.duplicateOf);
-  const total=qs.length;
-  const done=qs.filter(q=>prog(q.id).a>0).length;
+  const studyQs=qs.filter(q=>!isSkipQ(q));
+  const total=studyQs.length;
+  const done=studyQs.filter(q=>prog(q.id).a>0).length;
   const remaining=Math.max(0,total-done);
-  const dailyBrush=Math.max(5,+(s.dailyBrush)||50);
-  const dailyNew=Math.max(0,+(s.dailyNew)||20);
   const wk=Math.max(1,+(s.weekendFactor)||1.5);
   const pomo=Math.max(5,+(s.pomo)||25);
+  const perMin=2.2, perNew=6;
+  const brushW=Math.max(5,Math.round((+s.weekdayMin||90)/perMin));
+  const brushE=Math.max(5,Math.round(((+s.weekendMin||240)*wk)/perMin));
+  const newW=Math.max(0,Math.round((+s.weekdayMin||90)/perNew));
+  const newE=Math.max(0,Math.round((+s.weekendMin||240)/perNew));
   const pc=planCompute(); const factor=pc.factor||1;
+  // 按权重把每日题量分配到各科目(低优先级×0.5), 工作日给理解+综合, 周末给记忆+综合
+  // 先给每个"仍有剩余题量"的活跃科目保底 1 题/天, 再按权重分配余数, 避免低优先级被舍入成 0
+  const alloc=(dailyTotal,pool)=>{
+    const active=pool.filter(x=>(x.qDone||0)<(x.qTotal||0));
+    const eff=active.map(x=>({id:x.id,w:(x.weight||1)*(x.mode==="low"?0.5:1)}));
+    const totW=eff.reduce((a,x)=>a+x.w,0)||1;
+    const out={}; let rem=dailyTotal;
+    active.forEach(x=>{ out[x.id]=rem>0?1:0; if(rem>0) rem--; });
+    if(rem>0){
+      const extra={}; eff.forEach(x=>extra[x.id]=Math.max(0,Math.round(rem*x.w/totW)));
+      let diff=rem-Object.values(extra).reduce((a,b)=>a+b,0);
+      const keys=Object.keys(extra).filter(k=>extra[k]>0||out[k]>0);
+      let i=0; while(diff!==0&&keys.length){ const k=keys[i%keys.length]; const step=diff>0?1:-1; extra[k]+=step; diff-=step; i++; }
+      eff.forEach(x=>out[x.id]+=extra[x.id]);
+    }
+    return out;
+  };
+  const subj=this.subjects().filter(x=>x.mode!=="skip");
+  const calcPool=subj.filter(x=>x.cat==="calc"), memPool=subj.filter(x=>x.cat==="mem"), mixPool=subj.filter(x=>x.cat==="mix");
+  const allocW=alloc(brushW,[...calcPool,...mixPool]);
+  const allocE=alloc(brushE,[...memPool,...mixPool]);
+  const subjectPlan=subj.map(x=>({id:x.id,title:x.title,cat:x.cat,mode:x.mode,weight:x.weight,
+    qTotal:x.qTotal,qDone:x.qDone,qAcc:x.qAcc, dailyW:allocW[x.id]||0, dailyE:allocE[x.id]||0}));
   let phases=[];
   if(days<=0){ phases=[{name:"临考冲刺",days:1,dailyMock:1,dailyWrong:Math.min(remaining,40),focus:"保状态, 清错题"}]; }
   else if(days<=14){ phases=[{name:"冲刺模考",days,dailyMock:2,dailyWrong:Math.min(remaining,30),focus:"全真模考+错题清零"}]; }
   else{
     const base=Math.max(1,Math.round(days*0.5)), enh=Math.max(1,Math.round(days*0.3)), sprint=Math.max(1,days-base-enh);
     phases=[
-      {name:"基础夯实",days:base,dailyBrush,dailyNew,focus:"按章节顺序通刷, 建立第一遍印象"},
-      {name:"强化提升",days:enh,dailyBrush:Math.round(dailyBrush*1.2),dailyNew:Math.round(dailyNew*0.6),focus:"薄弱章节+错题重点突破"},
+      {name:"基础夯实",days:base,dailyBrush:brushW,dailyNew:newW,focus:"按类别路由通刷: 工作日主攻理解型, 周末背诵记忆型"},
+      {name:"强化提升",days:enh,dailyBrush:Math.round(brushW*1.2),dailyNew:Math.round(newW*0.6),focus:"薄弱章节+错题重点突破"},
       {name:"冲刺模考",days:sprint,dailyMock:1,dailyWrong:Math.min(remaining,20),focus:"全真模考+错题清零+查漏"}
     ];
   }
   const mockDays=phases.reduce((a,p)=>a+(p.dailyMock?p.days:0),0);
   const adj = factor>1.1?"近3天超额完成, 可适当加量或加模考":(factor<0.95?"近3天完成率偏低, 已自适应下调每日额度, 建议固定学习时段(如番茄钟)":"进度节奏良好");
-  ST.plan={engine:"deterministic",generatedAt:today0,examDate,days,total,done,remaining,
-    dailyBrush,dailyNew,weekendFactor:wk,pomo,factor,phases,mockDays,adj};
+  const weekdayTemplate=[
+    {block:"理解型科目刷题",min:Math.round((+s.weekdayMin||90)*0.55),content:"主攻 A 类理解计算科目(高等数学/物理/力学/流体等), 按权重分配每日 "+brushW+" 题"},
+    {block:"综合型原理",min:Math.round((+s.weekdayMin||90)*0.2),content:"C 类综合科目原理梳理 + 错题复盘"},
+    {block:"新卡 + 错题",min:Math.round((+s.weekdayMin||90)*0.25),content:"新知识点卡 "+newW+" 张 + 复盘前日错题"}
+  ];
+  const weekendTemplate=[
+    {block:"记忆型科目背诵",min:Math.round((+s.weekendMin||240)*0.4),content:"B 类记忆型科目(微生物/监测/评价/法规等)系统背诵, 按权重分配每日 "+brushE+" 题"},
+    {block:"综合型刷题",min:Math.round((+s.weekendMin||240)*0.35),content:"C 类综合科目整套题演练"},
+    {block:"套卷模考",min:Math.round((+s.weekendMin||240)*0.25),content:"周末时间充裕, 建议安排 1 套全真模考"}
+  ];
+  ST.plan={engine:"deterministic",generatedAt:today0,examName:s.examName,examDate,days,total,done,remaining,
+    weekdayMin:+s.weekdayMin,weekendMin:+s.weekendMin,weekendFactor:wk,pomo,factor,
+    brushW,brushE,newW,newE,catRouting:{calc:"工作日主攻",mem:"周末背诵",mix:"工作日原理+周末综合"},
+    phases,subjectPlan,mockDays,weekdayTemplate,weekendTemplate,adj};
   Store.save("plan"); this.renderDet(); toast("确定性计划已生成");
 },
 renderDet(){
   const out=$("#det-plan-out"); if(!out) return;
-  const p=ST.plan; if(!p){ out.innerHTML='<div class="muted" style="margin-top:8px">尚未生成。设置考试日期与每日目标后点「生成确定性计划」。</div>'; return; }
+  const p=ST.plan; if(!p){ out.innerHTML='<div class="muted" style="margin-top:8px">尚未生成。设置考试日期、工作日/周末时长与科目范围后点「生成确定性计划」。</div>'; return; }
+  const subjRows=(p.subjectPlan||[]).map(x=>`<tr>
+    <td style="padding:3px 6px">${esc(x.title)}</td>
+    <td style="text-align:center">${x.cat==="calc"?"理解·工作日":x.cat==="mem"?"记忆·周末":"综合·混合"}</td>
+    <td style="text-align:center">${x.mode==="low"?"低优先":x.mode==="skip"?"放弃":"正常"}</td>
+    <td style="text-align:center">${x.dailyW}</td><td style="text-align:center">${x.dailyE}</td>
+    <td style="text-align:center">${x.qAcc}%</td></tr>`).join("");
+  const tmpl=(arr,title)=>`<div class="muted" style="margin-top:8px"><b>${title}</b></div>`+arr.map(t=>`<div class="row" style="gap:8px;margin:3px 0"><span class="tag" style="min-width:120px">${esc(t.block)}</span><span class="muted" style="width:60px">${t.min}分</span><span style="font-size:12.5px">${esc(t.content)}</span></div>`).join("");
   const ph=p.phases.map((x,i)=>`<div style="border-left:3px solid var(--pri);padding:4px 10px;margin:8px 0">
     <b>阶段${i+1} · ${esc(x.name)}</b> <span class="muted">(${x.days}天)</span>
     <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:3px">
@@ -1330,9 +1456,17 @@ renderDet(){
       ${x.dailyWrong?`<span class="tag warn">错题 ${x.dailyWrong}/天</span>`:""}
     </div>
     <div class="muted" style="font-size:12px;margin-top:3px">${esc(x.focus||"")}</div></div>`).join("");
-  out.innerHTML=`<div class="muted" style="margin-top:8px">考试日期 <b>${esc(p.examDate||"未设置(默认90天)")}</b> · 剩余 <b>${p.days}</b> 天 · 总题 ${p.total} · 已做 ${p.done} · 余 <b>${p.remaining}</b> · 周末强度 <b>${p.weekendFactor}×</b> · 番茄钟 <b>${p.pomo}</b>分</div>
-    <div class="muted" style="font-size:12px">调节系数 ${p.factor} · ${esc(p.adj)}</div>${ph}
-    ${p.mockDays?`<div class="muted" style="margin-top:4px">含模考阶段共 <b>${p.mockDays}</b> 天, 冲刺期建议每天至少 1 套全真模考。</div>`:""}`;
+  out.innerHTML=`<div class="muted" style="margin-top:8px">考试 <b>${esc(p.examName||"未命名")}</b> · 日期 <b>${esc(p.examDate||"未设置")}</b> · 剩余 <b>${p.days}</b> 天 · 学习题 <b>${p.total}</b> · 已做 <b>${p.done}</b> · 余 <b>${p.remaining}</b></div>
+   <div class="muted" style="font-size:12px">工作日 <b>${p.weekdayMin}</b>分(≈${p.brushW}题+${p.newW}卡) · 周末 <b>${p.weekendMin}</b>分(≈${p.brushE}题+${p.newE}卡) · 周末强度 <b>${p.weekendFactor}×</b> · 番茄钟 <b>${p.pomo}</b>分 · 调节系数 ${p.factor}</div>
+   ${ph}
+   <div class="muted" style="margin-top:10px"><b>科目排程 (每日题量 · 按类别路由)</b></div>
+   <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">
+     <thead><tr style="color:var(--tx2)"><th style="text-align:left;padding:3px 6px">科目</th><th>类别</th><th>状态</th><th>工作日</th><th>周末</th><th>正确率</th></tr></thead>
+     <tbody>${subjRows}</tbody></table></div>
+   ${tmpl(p.weekdayTemplate,"工作日每日执行模板")}
+   ${tmpl(p.weekendTemplate,"周末每日执行模板")}
+   <div class="muted" style="margin-top:6px">${esc(p.adj)}</div>
+   ${p.mockDays?`<div class="muted" style="margin-top:4px">含模考阶段共 <b>${p.mockDays}</b> 天。</div>`:""}`;
 },
 pomoStart(){ if(this._pomoT){ this.pomoStop(); return; }
   const mins=Math.max(5,+(ST.settings.pomo)||25); this._pomoLeft=mins*60;
@@ -1357,8 +1491,13 @@ async aiGen(adjust){
   const stats=this.aiStats();
   const isLocal=/127\.0\.0\.1|localhost/.test(cfg.url||"");
   const statsLine=stats.map(c=>c.章+"("+c.题量+"题,已刷"+c.已刷+","+c.正确率+")").join("；");
+  const subj=this.subjects().filter(x=>x.mode!=="skip");
+  const skipNames=this.subjects().filter(x=>x.mode==="skip").map(x=>x.title).join("、")||"无";
+  const subjNames=subj.map(x=>x.title+"("+(x.cat==="calc"?"理解型·工作日":x.cat==="mem"?"记忆型·周末":"综合型·混合")+")").join("、");
   const prompt=`你是资深备考规划专家。请为以下考生输出一份完整、可直接执行的备考学习计划文档(Markdown)。
-【基本信息】注册环保工程师基础考试；考试日期: ${ST.settings.examDate||"未设置"}；今天: ${today()}；每日可学习: ${mins}分钟；每日目标: 刷题${ST.settings.dailyBrush}题+新卡${ST.settings.dailyNew}张。
+【基本信息】考试: ${ST.settings.examName||"注册环保工程师基础考试"}；考试日期: ${ST.settings.examDate||"未设置"}；今天: ${today()}；工作日可学习: ${+ST.settings.weekdayMin||90}分钟、周末可学习: ${+ST.settings.weekendMin||240}分钟。
+【科目范围】纳入计划科目(共${subj.length}): ${subjNames}；已放弃科目: ${skipNames}。
+【每日目标折算】工作日约刷题${Math.round((+ST.settings.weekdayMin||90)/2.2)}题+新卡${Math.round((+ST.settings.weekdayMin||90)/6)}张；周末约刷题${Math.round((+ST.settings.weekendMin||240)/2.2)}题+新卡${Math.round((+ST.settings.weekendMin||240)/6)}张。
 【各章掌握情况】(章: 题量/已刷/正确率) ${statsLine}。
 【输出结构】严格按以下标题结构输出, 每一节都必须写出具体、可执行的实质内容(具体到章节名/日期/天数/题量/正确率数字), 禁止留空、禁止只写括号里的提示语、禁止输出"略"或占位符:
 # 备考学习计划
@@ -1928,7 +2067,7 @@ const Settings={
     if(mode==="replace") SKEYS.forEach(k=>{ const def=ST_DEF[k];
       ST[k]= (def===undefined) ? (k==="exams"||k==="videos"?[]:{}) : JSON.parse(JSON.stringify(def)); });
     SKEYS.forEach(k=>{ if(body[k]!==undefined) ST[k]=body[k]; });
-    ST.settings=Object.assign({examDate:"",dailyNew:20,dailyBrush:50,theme:"light",supabaseUrl:"",supabaseKey:""},ST.settings);
+    ST.settings=Object.assign({examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,weekdayMin:90,weekendMin:240,subjects:{},theme:"light",supabaseUrl:"",supabaseKey:""},ST.settings);
     let addImp=0;
     if(imps.length){
       const cur=Imports.all(), names=new Set(cur.map(x=>x.name));
