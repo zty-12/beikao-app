@@ -2,8 +2,15 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>备考工作台 · 注册环保工程师</title>
+<meta name="theme-color" content="#5b5ce2">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" href="icons/icon-192.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
@@ -103,7 +110,24 @@ th{background:#f7f8fd}
 .hero-card .btn:hover{background:#f0efff}
 .hero-card .btn.ghost{background:rgba(255,255,255,.14);color:#fff;border-color:rgba(255,255,255,.45)}
 .hero-card .btn.ghost:hover{background:rgba(255,255,255,.24)}
-@media(max-width:760px){#side{display:none}#main{margin-left:0}}
+/* ---- 移动端: 隐藏侧栏, 改用底部导航 ---- */
+#mnav{display:none}
+@media(max-width:760px){
+  #side{display:none}
+  #main{padding:12px 12px calc(66px + env(safe-area-inset-bottom))}
+  #mnav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:60;overflow-x:auto;-webkit-overflow-scrolling:touch;
+    background:var(--card);border-top:1px solid var(--line);padding:6px 6px calc(6px + env(safe-area-inset-bottom));gap:4px;
+    box-shadow:0 -2px 14px rgba(35,35,80,.08)}
+  #mnav a{flex:0 0 auto;padding:7px 11px;font-size:12.5px;color:var(--tx2);text-decoration:none;border-radius:9px;white-space:nowrap}
+  #mnav a.on{background:var(--pri);color:#fff;font-weight:500}
+  #app{box-shadow:none}
+  .card{padding:14px;border-radius:12px}
+  .kv{gap:8px}.kv .item{min-width:0;flex:1 1 44%;padding:10px 12px}.kv .num{font-size:19px}
+  #main table{display:block;overflow-x:auto;white-space:nowrap}
+  h2{font-size:18px}
+  #snackbar{bottom:78px}
+  .media-img{max-width:100%}
+}
 </style>
 </head>
 <body>
@@ -115,6 +139,7 @@ th{background:#f7f8fd}
   </div>
   <div id="main"></div>
 </div>
+<nav id="mnav"></nav>
 <div id="snackbar"></div>
 <script>
 "use strict";
@@ -161,6 +186,8 @@ function bookMetaAll(){
       list.push({tag:"i"+i+"_",title:t,short:t.length>14?t.slice(0,13)+"…":t,imp:true}); } });
   _bmCache=list; _bmSig=sig; return list;
 }
+/* 章节范围匹配: 选「章」即含其下所有「节」(a1 命中 a1 / a1-2), 空列表 = 不限 */
+function chMatch(cid,list){ return (!list||!list.length)?true:list.some(c=>cid===c||cid.startsWith(c+"-")); }
 function bookOfCh(cid){ if(!cid) return null;
   const l=bookMetaAll();
   for(let i=l.length-1;i>=0;i--){ const t=l[i].tag; if(cid===t||cid.startsWith(t)) return l[i]; }
@@ -171,6 +198,7 @@ const ST = {progress:{}, srs:{}, settings:{examDate:"",dailyNew:20,dailyBrush:50
   supabaseUrl:"",supabaseKey:""}, plan:{}, exams:[], overrides:{}, daily:{},
   lib:{read:{},time:{},excerpts:[]}};
 const SKEYS=["progress","srs","settings","plan","exams","overrides","daily","lib","videos","aiPlan"];
+const ST_DEF=JSON.parse(JSON.stringify(ST));   // 出厂默认值快照, 供「全量覆盖导入」复位
 let _mem={};
 const Store={
   async init(){
@@ -201,6 +229,41 @@ const Store={
   },
   async saveAll(){ for(const k of SKEYS) await Store.save(k); }
 };
+/* ================= Supabase 增量同步 (合并而非整体覆盖) =================
+   多设备场景: 拉取时只把云端数据「合并」进本机, 不抹掉本机独有进度;
+   推送时把全部 SKEYS + 导入题库元数据(bk-imports)一起上传。 */
+const Sync={
+  _mergeArr(L,C){ const byId={}; (L||[]).forEach(x=>{ if(x&&x.id!==undefined) byId[x.id]=x; });
+    (C||[]).forEach(x=>{ if(x&&x.id!==undefined) byId[x.id]=x; else byId["_"+Math.random()]=x; }); return Object.values(byId); },
+  _mergeObj(L,C){ const o={}; const ks=new Set([...Object.keys(L||{}),...Object.keys(C||{})]);
+    for(const k of ks){ const lv=(L||{})[k], rv=(C||{})[k];
+      if(lv===undefined) o[k]=rv;
+      else if(rv===undefined) o[k]=lv;
+      else if(Array.isArray(lv)&&Array.isArray(rv)) o[k]=Sync._mergeArr(lv,rv);
+      else if(lv&&typeof lv==="object"&&rv&&typeof rv==="object") o[k]=Sync._mergeObj(lv,rv);
+      else o[k]=rv; }
+    return o; },
+  _mergeDaily(L,C){ const o=Object.assign({},L); for(const dt of Object.keys(C||{})){
+    if(!o[dt]) o[dt]=Object.assign({},C[dt]);
+    else { const a=o[dt],b=C[dt];
+      o[dt]={b:(a.b||0)+(b.b||0),ok:(a.ok||0)+(b.ok||0),cards:(a.cards||0)+(b.cards||0),
+        h:Array.from({length:24},(_,i)=>(a.h?a.h[i]||0:0)+(b.h?b.h[i]||0:0))}; } }
+    return o; },
+  _mergeLib(L,C){ return { read:Sync._mergeObj(L.read||{},C.read||{}),
+    time:Sync._mergeObj(L.time||{},C.time||{}), excerpts:Sync._mergeArr(L.excerpts||[],C.excerpts||[]) }; },
+  // cloud = 云端 payload {progress,srs,...,imports}
+  pull(cloud){ const c=cloud||{};
+    if(c.settings) ST.settings=Object.assign({},c.settings,
+      {supabaseUrl:ST.settings.supabaseUrl,supabaseKey:ST.settings.supabaseKey,ai:ST.settings.ai||c.settings.ai});
+    for(const k of ["progress","srs","overrides","daily","plan","aiPlan"]) if(c[k]!==undefined) ST[k]=Sync._mergeObj(ST[k]||{},c[k]);
+    if(c.exams) ST.exams=Sync._mergeArr(ST.exams||[],c.exams);
+    if(c.videos) ST.videos=Sync._mergeArr(ST.videos||[],c.videos);
+    if(c.lib) ST.lib=Sync._mergeLib(ST.lib||{},c.lib);
+    if(Array.isArray(c.imports)&&c.imports.length) Imports.mergeList(c.imports);
+  },
+  // 推送 payload: 含导入题库元数据
+  pushPayload(){ const data={}; SKEYS.forEach(k=>data[k]=ST[k]); data.imports=Imports.all(); return data; }
+};
 function today(){ return new Date().toISOString().slice(0,10); }
 function dkey(){ const d=ST.daily[today()]||{b:0,ok:0,cards:0,h:Array(24).fill(0)}; if(!d.h) d.h=Array(24).fill(0); ST.daily[today()]=d; return d; }
 
@@ -208,12 +271,31 @@ function dkey(){ const d=ST.daily[today()]||{b:0,ok:0,cards:0,h:Array(24).fill(0
 const $=s=>document.querySelector(s);
 function toast(m){ const t=$("#snackbar");t.textContent=m;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),1800); }
 function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+/* 轻量选择弹窗: 返回所选 val (Promise), 用于导入/覆盖等二选一场景 */
+function ask(msg,opts){
+  return new Promise(res=>{
+    const d=document.createElement("div");
+    d.style.cssText="position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:9999";
+    d.innerHTML=`<div class="card" style="max-width:440px"><div style="margin-bottom:12px;line-height:1.6">${msg}</div>
+      <div class="row" style="justify-content:flex-end">${opts.map((o,i)=>
+        `<button class="btn sm ${o.cls||""}" data-i="${i}">${esc(o.label)}</button>`).join(" ")}</div></div>`;
+    d.querySelectorAll("button[data-i]").forEach(b=>b.onclick=()=>{ d.remove(); res(opts[+b.dataset.i].val); });
+    d.onclick=e=>{ if(e.target===d){ d.remove(); res(opts[opts.length-1].val); } };
+    (document.body||document.documentElement).appendChild(d);
+  });
+}
 function subT(s){ s=esc(s); if(s.includes("$")) return s;   // 含 LaTeX 时不做下标替换, 交给 KaTeX
   return s.replace(/([A-Za-zμγλρσθφωΩΔαβ])_([A-Za-z0-9]{1,4})/g, "$1<sub>$2</sub>"); }
 function renderMath(el){
   if(window.renderMathInElement){ try{renderMathInElement(el,{delimiters:[
     {left:"$$",right:"$$",display:true},{left:"$",right:"$",display:false},{left:"\\(",right:"\\)",display:false}],
     throwOnError:false});}catch(e){} }
+}
+/* 知识点 content: 转义后保留 $...$ 公式(交给 KaTeX), 段落按换行拆分 */
+function kpContentHTML(kp){
+  const c=(kp.content||"").trim();
+  if(!c) return '<span class="muted">（无内容）</span>';
+  return c.split(/\n+/).filter(Boolean).map(s=>`<p style="margin:5px 0">${esc(s)}</p>`).join("");
 }
 function download(name,text,mime){
   const a=document.createElement("a");
@@ -233,7 +315,9 @@ const NAVS=[["home","首页","home"],["brush","刷题","brush"],["exam","模拟�
   ["cards","闪卡背诵","cards"],["tree","知识树","tree"],["lib","资料库","lib"],["wrong","错题本","wrong"],
   ["plan","学习计划","plan"],["proof","校对台","proof"],["stats","统计","stats"],["set","设置","set"]];
 function drawNav(cur){
-  $("#nav").innerHTML=NAVS.map(([r,t])=>`<a href="#${r}" class="${cur===r?"on":""}">${t}</a>`).join("");
+  const a=NAVS.map(([r,t])=>`<a href="#${r}" class="${cur===r?"on":""}">${t}</a>`).join("");
+  $("#nav").innerHTML=a;
+  const mn=$("#mnav"); if(mn) mn.innerHTML=a;
   const nr=Object.keys(IDX.q).length, na=allQ().filter(q=>prog(q.id).a>0).length;
   $("#foot").textContent=`题库 ${nr} 题 · 已做 ${na}`;
 }
@@ -248,7 +332,14 @@ function vHome(){
   const due=dueCards().length;
   const wrong=qs.filter(q=>prog(q.id).w>0&&!prog(q.id).mastered).length;
   const examDays=ST.settings.examDate? Math.ceil((new Date(ST.settings.examDate)-new Date())/864e5):null;
+  const lb=ST.settings.lastBackup; const lbDays=lb?Math.round((Date.now()-new Date(lb+"T00:00:00").getTime())/864e5):null;
+  const needBk=!lb||lbDays>=7;
   el.innerHTML=`<h2>${examDays===null?"备考工作台":"距离考试还有 <span style='color:var(--pri)'>"+examDays+"</span> 天"}</h2>
+  ${needBk?`<div class="card" style="border:1px solid #c0392b"><div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap">
+    <span style="font-size:13px">${lb?"已 "+lbDays+" 天未备份":"尚未备份过"} —— 进度只存在本机浏览器，换设备或清缓存会丢失；导入的题库同样需要「完整备份」。</span>
+    <span><button class="btn sm" onclick="Settings.exportAll(0)">立即备份进度</button>
+      <button class="btn sm ghost" onclick="Settings.exportAll(1)">完整备份</button>
+      <button class="btn sm ghost" onclick="location.hash='#set'">设置</button></span></div></div>`:""}
   <div class="card hero-card"><div class="row" style="justify-content:space-between">
     <div class="kv" style="margin:0">
       <div class="item"><div class="muted">今日已刷</div><div class="num">${dkey().b} <span style="font-size:12px">/ ${+ST.settings.dailyBrush||50} 题</span></div></div>
@@ -443,7 +534,7 @@ Exam.typeOptions=function(sel){
 Exam.qPoolCount=function(books,chapters){
   let p=allQ().filter(q=>q.stem&&q.options&&q.options.length>=2&&!q.incomplete&&q.answer&&q.answer.resolved)
     .filter(q=>books.length&&books.some(b=>q.chapterId.startsWith(b)));
-  if(chapters&&chapters.length) p=p.filter(q=>chapters.includes(q.chapterId));
+  p=p.filter(q=>chMatch(q.chapterId,chapters));
   return p.length;
 };
 Exam.renderCustom=function(){
@@ -640,8 +731,8 @@ Exam._run=function(rule){
   for(const sec of rule.sections||[]){
     let pool=allQ().filter(q=>q.stem&&q.options.length>=2&&!q.incomplete)
       .filter(q=>!rule.scopeBooks||rule.scopeBooks.some(b=>q.chapterId.startsWith(b.toLowerCase())))
-      .filter(q=>!rule.scopeChapters||!rule.scopeChapters.length||rule.scopeChapters.includes(q.chapterId))
-      .filter(q=>!sec.chapterIds||!sec.chapterIds.length||sec.chapterIds.includes(q.chapterId));
+      .filter(q=>chMatch(q.chapterId,rule.scopeChapters))
+      .filter(q=>chMatch(q.chapterId,sec.chapterIds));
     if(!sec.preferWrong) pool=pool.filter(q=>q.answer.resolved);   // 判分优先有答案题
     // 加权: 错题 x3, 未做 x2
     const weighted=[];
@@ -869,12 +960,36 @@ function vTree(){
   <div id="tree-detail"></div>`;
   Tree.draw();
 }
+const CN={零:0,一:1,二:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9,两:2};
+function cn2n(s){   // 中文数字 → 整数 (支持 十一 / 二十 / 一百二十三)
+  s=String(s||"").replace(/[零〇]/g,"");
+  let n=0,cur=0;
+  for(const ch of s){
+    if(ch==="十"){ cur=(cur||1)*10; n+=cur; cur=0; }
+    else if(ch==="百"){ cur=(cur||1)*100; n+=cur; cur=0; }
+    else if(ch==="千"){ cur=(cur||1)*1000; n+=cur; cur=0; }
+    else if(ch in CN){ cur=CN[ch]; }
+  }
+  return n+cur;
+}
 const Tree={
-  kpKey(t){ const m=(t||"").match(/^(\d+(?:\.\d+)*)/); if(m) return m[1].split(".").map(n=>+n);
-    const m2=(t||"").match(/^[（(]?(\d+)[）)、.，,]/); if(m2) return [90,+m2[1]]; return null; },
+  /* 标题编号形态识别 → {cls, val|key}
+     cls 0: 第X章 / 一、二、    cls 1: （一）    cls 2: 1. 或 1、    cls 3: 多级编号 1.2 / 1.2.3 */
+  kpShape(t){
+    t=String(t||"").trim(); let m;
+    if((m=t.match(/^第\s*([一二三四五六七八九十百]+)\s*[章节篇部]/))) return {cls:0,val:cn2n(m[1])};
+    if((m=t.match(/^([一二三四五六七八九十百]+)\s*[、．.,]/)))   return {cls:0,val:cn2n(m[1])};
+    if((m=t.match(/^[（(]\s*([一二三四五六七八九十百]+)\s*[）)]/))) return {cls:1,val:cn2n(m[1])};
+    if((m=t.match(/^(\d+(?:\.\d+)+)/)))  return {cls:3,key:m[1].split(".").map(Number)};
+    if((m=t.match(/^(\d+)\s*[、．.](?!\d)/))) return {cls:2,val:+m[1]};
+    return null;
+  },
+  kpKey(t){ const s=this.kpShape(t); if(!s) return null;
+    return s.cls===3?s.key:[s.cls,s.val]; },
   kpCmp(a,b){ const ka=this.kpKey(a),kb=this.kpKey(b);
     if(!ka&&!kb) return 0; if(!ka) return 1; if(!kb) return -1;
-    for(let i=0;i<Math.max(ka.length,kb.length);i++){ const x=ka[i]||0,y=kb[i]||0; if(x!==y) return x-y; } return 0; },
+    for(let i=0;i<Math.max(ka.length,kb.length);i++){ const x=ka[i]===undefined?-1:ka[i], y=kb[i]===undefined?-1:kb[i];
+      if(x!==y) return x-y; } return 0; },
   chapterKids(cid){
     let kids=(IDX.kpKids[cid]||[]).slice();
     const assigned=new Set(kids);
@@ -886,17 +1001,48 @@ const Tree={
       if(!realParent&&!numParent) kids.push(id); });
     return kids.sort((x,y)=>this.kpCmp((IDX.kp[x]||{}).title,(IDX.kp[y]||{}).title));
   },
-  _calcNumTree(){   // 依据标题编号推断父子 (10.1 -> 10.1.1), 供无 parentId 的资料分主支/次支
+  _calcNumTree(){   // 依据标题编号推断父子, 供无 parentId 的资料分主支/次支
     this._numKids={}; this._numParentOf={};
+    const kps=(BANK.knowledgePoints||[]).filter(k=>IDX.kp[k.id]);
+    // ① 多级阿拉伯编号 (10.1 → 10.1.1): 按编号前缀找父级
     const byKey={};
-    for(const k of BANK.knowledgePoints||[]){ if(!IDX.kp[k.id]) continue;
-      const key=this.kpKey(k.title||"");
-      if(key&&k.chapterId) byKey[k.chapterId+"#"+key.join(".")]=k.id; }
-    for(const k of BANK.knowledgePoints||[]){ if(!IDX.kp[k.id]) continue;
-      const key=this.kpKey(k.title||"");
-      if(key&&key.length>1&&k.chapterId){
-        const pid=byKey[k.chapterId+"#"+key.slice(0,-1).join(".")];
+    for(const k of kps){ const s=this.kpShape(k.title||"");
+      if(s&&(s.cls===3||s.cls===2)&&k.chapterId)
+        byKey[k.chapterId+"#"+(s.cls===3?s.key:[s.val]).join(".")]=k.id; }   // cls2 "10." 也登记, 供 "10.1" 认父
+    for(const k of kps){ const s=this.kpShape(k.title||"");
+      if(s&&s.cls===3&&s.key.length>1&&k.chapterId){
+        const pid=byKey[k.chapterId+"#"+s.key.slice(0,-1).join(".")];
         if(pid&&pid!==k.id){ (this._numKids[pid]=this._numKids[pid]||[]).push(k.id); this._numParentOf[k.id]=pid; } } }
+    // ② 中文序号体系 (一、 → （一） → 1.): 按文档顺序用单调栈挂层级
+    const byCh={};
+    for(const k of kps){ const s=this.kpShape(k.title||"");
+      if(!s||s.cls===3) continue;
+      (byCh[k.chapterId||""]=byCh[k.chapterId||""]||[]).push({id:k.id,cls:s.cls}); }
+    for(const cid in byCh){
+      const stack=[];
+      for(const n of byCh[cid]){
+        while(stack.length&&stack[stack.length-1].cls>=n.cls) stack.pop();
+        const p=stack.length?stack[stack.length-1]:null;
+        if(p&&p.id!==n.id&&!this._numParentOf[n.id]){
+          (this._numKids[p.id]=this._numKids[p.id]||[]).push(n.id); this._numParentOf[n.id]=p.id; }
+        stack.push(n);
+      }
+    }
+    // ③ 显式 level 字段 (无编号导入资料的层级): 按文档顺序用单调栈挂父级
+    const byChL={};
+    for(const k of kps){ if(k.level===undefined||k.level===null) continue;
+      if(this.kpShape(k.title||"")) continue;   // 已有编号则交给上面的编号逻辑
+      (byChL[k.chapterId||""]=byChL[k.chapterId||""]||[]).push({id:k.id,lv:+k.level}); }
+    for(const cid in byChL){
+      const stack=[];
+      for(const n of byChL[cid]){
+        while(stack.length&&stack[stack.length-1].lv>=n.lv) stack.pop();
+        const p=stack.length?stack[stack.length-1]:null;
+        if(p&&p.id!==n.id&&!this._numParentOf[n.id]){
+          (this._numKids[p.id]=this._numKids[p.id]||[]).push(n.id); this._numParentOf[n.id]=p.id; }
+        stack.push(n);
+      }
+    }
   },
   draw(){
     const kw=($("#tree-q").value||"").toLowerCase();
@@ -934,8 +1080,11 @@ const Tree={
     if(kp){
       const qs=allQ().filter(q=>(q.knowledgePointIds||[]).includes(id));
       box.innerHTML=`<div class="card"><h2 style="font-size:15px">${esc(kp.title||id)}</h2>
-        <div style="line-height:1.8;margin:10px 0">${esc(kp.content||"（无内容）")}</div>
-        <div class="row"><button class="btn sm" onclick="Tree.review('${id.replace(/"/g,"")}')">生成今日复习卡</button>
+        <div class="kp-content" style="line-height:1.85;margin:10px 0">${kpContentHTML(kp)}</div>
+        ${kp.media&&kp.media.length?`<div style="margin:8px 0">${kp.media.map(m=>`<img class="media-img" src="${mediaSrc(m)}" alt="配图" style="max-width:100%;border-radius:6px;margin:4px 0" onerror="this.style.display='none'">`).join("")}</div>`:""}
+        ${(kp.tags||[]).length?`<div class="row" style="flex-wrap:wrap;gap:6px;margin-top:4px">${kp.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</div>`:""}
+        ${kp.sourcePage?`<div class="muted" style="margin-top:6px;font-size:12px">出处: ${esc(kp.sourceBook||"")} p${esc(kp.sourcePage)}</div>`:""}
+        <div class="row" style="margin-top:10px"><button class="btn sm" onclick="Tree.review('${id.replace(/"/g,"")}')">生成今日复习卡</button>
         <button class="btn sm ghost" onclick="location.hash='#brush'">刷本章题</button></div>
         ${qs.length?`<div class="muted" style="margin-top:8px">关联题目 ${qs.length} 道</div>`:""}</div>`;
     } else {
@@ -1086,16 +1235,90 @@ renderAi(){
 }};
 
 /* ================= 校对台 ================= */
-const Proof={queue:[],pos:0};
+const Proof={queue:[],pos:0,f:{kind:"todo",book:"",ch:""}};
 function vProof(){
-  Proof.queue=allQ().filter(q=>q.needsReview).sort((a,b)=>(b.answer.mismatch?1:0)-(a.answer.mismatch?1:0));
-  Proof.pos=0;
-  $("#main").innerHTML=`<h2>校对台 <span class="muted" style="font-size:12px">${Proof.queue.length} 题待校对</span></h2>
-  <div class="card"><div class="row">
-    <button class="btn ghost sm" onclick="Proof.exportPatch()">导出校对后的题库 JSON</button>
-    <span class="muted">优先级: 答案冲突 > 缺答案 > 不完整; 左侧原图对照, 右侧修正, 保存后自动解除待校对。</span></div></div>
+  const chOpts=Object.entries(IDX.ch).map(([id,c])=>`<option value="${id}" ${Proof.f.ch===id?"selected":""}>${esc(c.title)}</option>`);
+  const bookOpts=bookMetaAll().map(b=>`<option value="${esc(b.tag)}" ${Proof.f.book===b.tag?"selected":""}>${esc(b.title)}</option>`);
+  $("#main").innerHTML=`<h2>校对台 <span class="muted" style="font-size:12px" id="pf-head"></span></h2>
+  <div class="card"><div class="row" style="flex-wrap:wrap">
+    <select id="pf-kind" onchange="Proof.f.kind=this.value;Proof.rebuild()">
+      <option value="todo" ${Proof.f.kind==="todo"?"selected":""}>待校对（全部）</option>
+      <option value="mismatch" ${Proof.f.kind==="mismatch"?"selected":""}>仅答案冲突</option>
+      <option value="noans" ${Proof.f.kind==="noans"?"selected":""}>仅缺答案</option>
+      <option value="incomplete" ${Proof.f.kind==="incomplete"?"selected":""}>仅不完整(缺题干/选项)</option>
+      <option value="done" ${Proof.f.kind==="done"?"selected":""}>已校对</option></select>
+    <select id="pf-book" onchange="Proof.f.book=this.value;Proof.rebuild()"><option value="">全部资料</option>${bookOpts}</select>
+    <select id="pf-ch" onchange="Proof.f.ch=this.value;Proof.rebuild()"><option value="">全部章节</option>${chOpts}</select>
+    <span class="muted" id="pf-stat" style="font-size:12px"></span></div>
+    <div class="row" style="margin-top:8px;flex-wrap:wrap">
+      <button class="btn sm" onclick="Proof.batchAsk()">批量处理答案冲突…</button>
+      <button class="btn ghost sm" onclick="Proof.exportPatch()">导出校对后的题库 JSON</button>
+      <span class="muted" style="font-size:12px">优先级: 答案冲突 &gt; 缺答案 &gt; 不完整; 左侧原图对照, 右侧修正, 保存后自动解除待校对。</span></div>
+    <div class="muted" style="font-size:11px;margin-top:6px">键盘: <b>A/B/C/D</b> 选答案 · <b>Enter</b> 保存并下一题 · <b>S</b> 跳过 · <b>←/→</b> 前后翻</div></div>
   <div id="proof-area"></div>`;
-  Proof.draw();
+  wireProofKeys();
+  Proof.rebuild();
+}
+Proof.rebuild=function(){
+  const f=this.f;
+  let qs;
+  if(f.kind==="done") qs=allQ().filter(q=>ST.overrides[q.id]&&ST.overrides[q.id].needsReview===false);
+  else{
+    qs=allQ().filter(q=>q.needsReview);
+    if(f.kind==="mismatch") qs=qs.filter(q=>q.answer.mismatch);
+    else if(f.kind==="noans") qs=qs.filter(q=>!q.answer.resolved);
+    else if(f.kind==="incomplete") qs=qs.filter(q=>q.incomplete);
+  }
+  if(f.book) qs=qs.filter(q=>q.chapterId.startsWith(f.book));
+  if(f.ch) qs=qs.filter(q=>q.chapterId===f.ch||q.chapterId.startsWith(f.ch+"-"));
+  qs.sort((a,b)=>((b.answer.mismatch?1:0)-(a.answer.mismatch?1:0))||((a.answer.resolved?1:0)-(b.answer.resolved?1:0))||((b.incomplete?1:0)-(a.incomplete?1:0)));
+  this.queue=qs; this.pos=0;
+  const all=allQ();
+  const todo=all.filter(q=>q.needsReview).length;
+  const mm=all.filter(q=>q.answer.mismatch).length;
+  const na=all.filter(q=>!q.answer.resolved).length;
+  const ic=all.filter(q=>q.incomplete).length;
+  const dn=all.filter(q=>ST.overrides[q.id]&&ST.overrides[q.id].needsReview===false).length;
+  const head=$("#pf-head"); if(head) head.textContent=`待校对 ${todo} · 答案冲突 ${mm} · 缺答案 ${na} · 不完整 ${ic} · 已校对 ${dn}`;
+  const st=$("#pf-stat"); if(st) st.textContent=`当前筛选 ${qs.length} 题`;
+  this.draw();
+};
+Proof.nav=function(d){ this.pos=Math.max(0,Math.min(this.queue.length-1,this.pos+d)); this.draw(); };
+Proof.ignore=function(){   // 标记无需校对但不改答案
+  const q=this.queue[this.pos]; if(!q) return;
+  const ov=ST.overrides[q.id]||{}; ov.needsReview=false;
+  ST.overrides[q.id]=ov; Store.save("overrides");
+  this.pos++; this.draw(); toast("已标记为无需校对");
+};
+Proof.batchAsk=async function(){
+  const all=allQ().filter(q=>q.answer.mismatch);
+  if(!all.length){ toast("当前没有答案冲突题"); return; }
+  const src=await ask(`共 <b>${all.length}</b> 道题「答案键」与「解析推得」不一致。<br>选择批量采纳的依据：`,
+    [{label:"采纳 答案键 (fromKey)",val:"fromKey"},{label:"采纳 解析推得 (fromAnalysis)",val:"fromAnalysis"},{label:"取消",val:"",cls:"ghost"}]);
+  if(!src) return;
+  let n=0;
+  for(const q of all){ const v=q.answer[src]; if(!v) continue;
+    const ov=ST.overrides[q.id]||{};
+    ov.answer=Object.assign({},ov.answer,{resolved:v,mismatch:false});
+    ov.needsReview=false; ST.overrides[q.id]=ov; n++; }
+  Store.save("overrides");
+  toast(n?`已批量采纳 ${n} 题（依据 ${src==="fromKey"?"答案键":"解析推得"}）；未取到值的不处理`:"没有可取值的冲突题");
+  this.rebuild();
+};
+function wireProofKeys(){
+  if(Proof._kh) document.removeEventListener("keydown",Proof._kh);
+  Proof._kh=e=>{
+    if(location.hash!=="#proof") return;
+    const t=(e.target&&e.target.tagName)||"";
+    if(t==="TEXTAREA"||t==="INPUT"||t==="SELECT") return;
+    const k=String(e.key||"").toUpperCase();
+    if(k.length===1&&"ABCD".includes(k)){ const s=$("#pf-ans"); if(s) s.value=k; e.preventDefault(); return; }
+    if(e.key==="Enter"){ e.preventDefault(); Proof.save(true); }
+    else if(k==="S"){ Proof.save(false); }
+    else if(e.key==="ArrowRight"){ Proof.nav(1); }
+    else if(e.key==="ArrowLeft"){ Proof.nav(-1); }
+  };
+  document.addEventListener("keydown",Proof._kh);
 }
 Proof.draw=function(){
   const area=$("#proof-area");
@@ -1103,7 +1326,7 @@ Proof.draw=function(){
   const q=Proof.queue[Proof.pos];
   area.innerHTML=`<div class="card">
     <div class="row" style="justify-content:space-between"><div>
-      ${q.answer.mismatch?'<span class="tag bad">7闸: 答案冲突</span>':""}
+      ${q.answer.mismatch?'<span class="tag bad">⚠ 答案冲突</span>':""}
       ${!q.answer.resolved?'<span class="tag warn">缺答案</span>':""}
       ${q.incomplete?'<span class="tag bad">不完整(缺题干/选项)</span>':""}
       <span class="muted">${q.id} · ${esc(chapPath(q.chapterId))} · p${q.sourcePage||"?"}</span></div>
@@ -1128,7 +1351,9 @@ Proof.draw=function(){
         </details>
         <div class="row" style="margin-top:8px">
           <button class="btn ok" onclick="Proof.save(true)">保存并下一题</button>
-          <button class="btn gray" onclick="Proof.save(false)">跳过</button></div>
+          <button class="btn gray" onclick="Proof.save(false)">跳过</button>
+          <button class="btn ghost sm" onclick="Proof.ignore()">标记无需校对</button>
+          <button class="btn ghost sm" onclick="Proof.nav(-1)">← 上一题</button></div>
       </div></div></div>`;
   renderMath(area);
 };
@@ -1153,6 +1378,31 @@ Proof.exportPatch=function(){
 function vStats(){
   const qs=allQ(); const done=qs.filter(q=>prog(q.id).a>0);
   const okc=done.filter(q=>prog(q.id).c>prog(q.id).w).length;
+  // 掌握度分层: 未刷 / 生疏(错≥对) / 熟悉(对>错) / 掌握(全对≥2次 或 手动标记掌握)
+  const lv={none:0,weak:0,fam:0,mst:0};
+  for(const q of qs){ const p=prog(q.id);
+    if(!p.a){ lv.none++; continue; }
+    if(p.mastered||(p.c>p.w&&p.w===0&&p.c>=2)) lv.mst++;
+    else if(p.c>p.w) lv.fam++;
+    else lv.weak++; }
+  const accAll=done.length?Math.round(okc/done.length*100):0;
+  // 章节统计(带 cid, 供薄弱章节排行与一键组卷)
+  const chStat=Object.entries(IDX.ch).map(([cid,c])=>{
+    const cq=qs.filter(q=>q.chapterId===cid||q.chapterId.startsWith(cid+"-"));
+    const dn=cq.filter(q=>prog(q.id).a>0);
+    const ok=dn.filter(q=>prog(q.id).c>prog(q.id).w).length;
+    return {cid,title:c.title,n:cq.length,d:dn.length,acc:dn.length?Math.round(ok/dn.length*100):null};
+  });
+  const weak=chStat.filter(r=>r.d>=3&&r.acc!==null).sort((a,b)=>a.acc-b.acc).slice(0,10);
+  // 按资料(书)统计 —— 书名取真实导入文件名
+  const bmap={};
+  for(const q of qs){ const m=bookOfCh(q.chapterId); const t=m?m.title:"未归类";
+    const b=bmap[t]||(bmap[t]={n:0,d:0,ok:0}); b.n++; const p=prog(q.id);
+    if(p.a){ b.d++; if(p.c>p.w) b.ok++; } }
+  const brows=Object.entries(bmap).sort((a,b)=>b[1].n-a[1].n);
+  // 模考目标(默认 70%)
+  const tgt=+ST.settings.targetAcc||0;
+  const lastEx=ST.exams[0]||null;
   // 近7天
   const days=[]; for(let i=6;i>=0;i--){ const dt=new Date(Date.now()-i*864e5).toISOString().slice(0,10);
     days.push([dt.slice(5),ST.daily[dt]||{b:0,ok:0,cards:0}]); }
@@ -1175,17 +1425,56 @@ function vStats(){
     heat.push(`<i title="${k} · ${b}题" style="width:11px;height:11px;border-radius:2px;${st}"></i>`);
   }
   // 章节 × 正确率
-  const rows=Object.entries(IDX.ch).map(([cid,c])=>{
-    const cq=qs.filter(q=>q.chapterId===cid||q.chapterId.startsWith(cid+"-"));
-    const dn=cq.filter(q=>prog(q.id).a>0); const ok=dn.filter(q=>prog(q.id).c>prog(q.id).w).length;
-    return [c.title,cq.length,dn.length,dn.length?Math.round(ok/dn.length*100):null];
-  }).filter(r=>r[2]>0);
+  const rows=chStat.filter(r=>r.d>0).map(r=>[r.title,r.n,r.d,r.acc]);
+  const LV=[["掌握","var(--ok-bg)","#2e7d32",lv.mst],["熟悉","var(--warn-bg)","#a8801a",lv.fam],
+    ["生疏","var(--bad-bg)","#c0392b",lv.weak],["未刷","rgba(128,128,128,.18)","#777",lv.none]];
+  const lvTot=Math.max(1,lv.mst+lv.fam+lv.weak+lv.none);
+  // 正确率趋势(近30天) / 按科目正确率 / 模考 vs 目标差距 —— 图表数据
+  const _tN=30,_tW=600,_tH=160,_tPL=34,_tPR=12,_tPT=14,_tPB=22;
+  const _td=[]; for(let i=_tN-1;i>=0;i--){ const dt=new Date(Date.now()-i*864e5).toISOString().slice(0,10);
+    const v=ST.daily[dt]; _td.push({dt,acc:(v&&v.b)?v.ok/v.b*100:null,b:v?v.b:0}); }
+  const _X=i=>_tPL+(_tW-_tPL-_tPR)*i/(_tN-1);
+  const _Y=a=>_tPT+(_tH-_tPT-_tPB)*(1-a/100);
+  const _av=_td.filter(d=>d.acc!==null);
+  const _poly=_av.length?("M"+_av.map(d=>{const idx=_td.indexOf(d);return _X(idx).toFixed(1)+" "+_Y(d.acc).toFixed(1);}).join(" L")):"";
+  const _dots=_av.map(d=>{const idx=_td.indexOf(d);return `<circle cx="${_X(idx).toFixed(1)}" cy="${_Y(d.acc).toFixed(1)}" r="2.4" fill="var(--pri)"/>`;}).join("");
+  const _tgrid=[0,50,100].map(g=>`<line x1="${_tPL}" y1="${_Y(g)}" x2="${_tW-_tPR}" y2="${_Y(g)}" stroke="rgba(128,128,128,.2)"/><text x="${_tPL-4}" y="${(_Y(g)+3)}" text-anchor="end" font-size="9" fill="#888">${g}</text>`).join("");
+  const _tline=tgt?`<line x1="${_tPL}" y1="${_Y(tgt)}" x2="${_tW-_tPR}" y2="${_Y(tgt)}" stroke="#c0392b" stroke-dasharray="4 3"/><text x="${_tW-_tPR}" y="${(_Y(tgt)-3).toFixed(1)}" text-anchor="end" font-size="10" fill="#c0392b">目标 ${tgt}%</text>`:"";
+  const _trendSVG=`<svg viewBox="0 0 ${_tW} ${_tH}" style="width:100%;max-width:600px;height:auto;color:var(--fg)">${_tgrid}<path d="${_poly}" fill="none" stroke="var(--pri)" stroke-width="2"/>${_dots}${_tline}<text x="${_tPL}" y="${_tH-6}" font-size="9" fill="#888">${_td[0].dt.slice(5)}</text><text x="${_tW-_tPR}" y="${_tH-6}" text-anchor="end" font-size="9" fill="#888">${_td[_tN-1].dt.slice(5)}</text></svg>`;
+  const _sb=[]; for(const q of qs){ const m=bookOfCh(q.chapterId); const t=m?m.title:"未归类";
+    let s=_sb.find(x=>x.t===t); if(!s){ s={t,n:0,d:0,ok:0}; _sb.push(s); } s.n++; const p=prog(q.id);
+    if(p.a){ s.d++; if(p.c>p.w) s.ok++; } }
+  const _sbArr=_sb.map(s=>({t:s.t,n:s.n,d:s.d,acc:s.d?s.ok/s.d*100:0})).sort((a,b)=>a.acc-b.acc);
+  const _sbH=Math.max(40,_sbArr.length*22);
+  const _sbSVG=`<svg viewBox="0 0 620 ${_sbH}" style="width:100%;max-width:620px;height:auto;color:var(--fg)">${_sbArr.map((s,i)=>{const col=s.acc>=70?"var(--ok)":s.acc>=40?"var(--warn)":"var(--bad)";
+    return `<g transform="translate(0,${i*22})"><text x="0" y="14" font-size="11" fill="currentColor">${esc(s.t.slice(0,14))}</text>
+      <rect x="150" y="2" width="400" height="15" rx="3" fill="rgba(128,128,128,.15)"/>
+      <rect x="150" y="2" width="${Math.max(2,400*s.acc/100)}" height="15" rx="3" fill="${col}"/>
+      <text x="560" y="14" font-size="10" fill="#555" text-anchor="end">${s.acc?Math.round(s.acc)+"%":"—"} (${s.d}/${s.n})</text></g>`;}).join("")}</svg>`;
+  const _exs=ST.exams.slice(0,12), _exN=_exs.length;
+  const _avg=_exN?Math.round(_exs.reduce((s,e)=>s+e.acc,0)/_exN):0;
+  const _exBW=520,_exBH=16,_exGap=8,_exCH=Math.max(20,_exN*(_exBH+_exGap));
+  const _exSVG=`<svg viewBox="0 0 ${_exBW+70} ${_exCH}" style="width:100%;max-width:600px;height:auto;color:var(--fg)">
+    ${tgt?`<line x1="${44+(_exBW-44)*tgt/100}" y1="0" x2="${44+(_exBW-44)*tgt/100}" y2="${_exCH}" stroke="#c0392b" stroke-dasharray="4 3"/>`:""}
+    ${_exs.map((e,i)=>{const yy=i*(_exBH+_exGap); const col=e.acc>=tgt?"var(--pri)":"#c0392b"; const w=44+(_exBW-44)*e.acc/100;
+      return `<g transform="translate(0,${yy})"><text x="0" y="${_exBH-3}" font-size="9" fill="currentColor">${e.date.slice(5)}</text>
+      <rect x="44" y="0" width="${_exBW-44}" height="${_exBH}" rx="3" fill="rgba(128,128,128,.15)"/>
+      <rect x="44" y="0" width="${Math.max(2,w-44)}" height="${_exBH}" rx="3" fill="${col}"/></g>`;}).join("")}</svg>`;
   $("#main").innerHTML=`<h2>统计</h2>
   <div class="card"><div class="kv">
     <div class="item"><div class="muted">总题量</div><div class="num">${qs.length}</div></div>
     <div class="item"><div class="muted">已刷</div><div class="num">${done.length}</div></div>
-    <div class="item"><div class="muted">总正确率</div><div class="num">${done.length?Math.round(okc/done.length*100):0}%</div></div>
-    <div class="item"><div class="muted">模考次数</div><div class="num">${ST.exams.length}</div></div></div></div>
+    <div class="item"><div class="muted">总正确率</div><div class="num">${accAll}%</div></div>
+    <div class="item"><div class="muted">模考次数</div><div class="num">${ST.exams.length}</div></div></div>
+    <div style="margin-top:12px"><div class="muted" style="font-size:12px;margin-bottom:4px">掌握度分布
+      <span style="float:right">目标正确率
+        <input type="number" min="0" max="100" value="${tgt||""}" placeholder="未设"
+          style="width:52px;margin-left:2px" onchange="Stat.setTarget(this.value)"> %
+        ${tgt?`<span style="margin-left:8px;color:${accAll>=tgt?"var(--pri)":"#c0392b"}">当前 ${accAll}% · ${accAll>=tgt?"已达标":"差 "+(tgt-accAll)+" 个百分点"}</span>`:""}</span></div>
+      <div class="row" style="gap:1px;height:18px;border-radius:6px;overflow:hidden">
+        ${LV.map(([n,bg,c,v])=>v?`<i title="${n} ${v}题" style="background:${bg};height:18px;width:${(v/lvTot*100).toFixed(2)}%"></i>`:"").join("")}</div>
+      <div class="row muted" style="font-size:11px;margin-top:6px;gap:12px">
+        ${LV.map(([n,bg,c,v])=>`<span><i style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${c};margin-right:3px"></i>${n} ${v} (${Math.round(v/lvTot*100)}%)</span>`).join("")}</div></div></div>
   <div class="card"><h2 style="font-size:14px">近7天活跃</h2>
     <div class="row" style="align-items:flex-end;gap:14px;height:110px;margin-top:10px">
     ${days.map(([d,v])=>`<div style="text-align:center"><div style="width:30px;background:var(--pri);height:${Math.round(v.b/maxB*80)+2}px;border-radius:4px 4px 0 0" title="${v.b}题/${v.ok}对"></div><div class="muted" style="font-size:10px">${d}</div></div>`).join("")}</div></div>
@@ -1202,11 +1491,50 @@ function vStats(){
     <table style="margin-top:8px"><tr><th>章节</th><th>题量</th><th>已刷</th><th>正确率</th></tr>
     ${rows.sort((a,b)=>a[3]-b[3]).map(r=>`<tr><td>${esc(r[0])}</td><td>${r[1]}</td><td>${r[2]}</td>
       <td style="background:${r[3]>=70?"var(--ok-bg)":r[3]>=40?"var(--warn-bg)":"var(--bad-bg)"}">${r[3]}%</td></tr>`).join("")}</table></div>
-  ${ST.exams.length?`<div class="card"><h2 style="font-size:14px">模考趋势</h2>
-    ${ST.exams.slice(0,8).map((e,i)=>`<div class="row" style="margin:4px 0"><span class="muted" style="width:150px">${e.date.slice(5,10)}</span>
-      <div class="bar grow"><i style="width:${e.acc}%"></i></div><span class="muted">${e.score}/${e.total} (${e.acc}%)</span>
-      <button class="btn sm ghost" onclick="Exam.delReport(${i})">删除</button></div>`).join("")}</div>`:""}`;
+  <div class="card"><h2 style="font-size:14px">正确率趋势（近30天）</h2>
+    ${_trendSVG}
+    <div class="muted" style="font-size:10px;margin-top:4px">每日正确率 = 当日答对/当日做题；无做题日不连线。</div></div>
+  <div class="card"><h2 style="font-size:14px">按科目正确率 <span class="muted" style="font-weight:400">（科目=资料/书）</span></h2>
+    ${_sbSVG}
+    <div class="muted" style="font-size:10px;margin-top:4px">条形长度=正确率，括号内=已刷/题量。</div></div>
+  ${weak.length?`<div class="card"><h2 style="font-size:14px">薄弱章节 TOP${weak.length} <span class="muted" style="font-weight:400">已刷≥3题 · 正确率升序</span></h2>
+    <table style="margin-top:8px"><tr><th>章节</th><th>已刷/题量</th><th>正确率</th><th style="width:130px"></th></tr>
+    ${weak.map(r=>`<tr><td>${esc(r.title)}</td><td class="muted">${r.d}/${r.n}</td>
+      <td style="background:${r.acc>=70?"var(--ok-bg)":r.acc>=40?"var(--warn-bg)":"var(--bad-bg)"}">${r.acc}%</td>
+      <td><button class="btn sm ghost" onclick="Stat.paper('${r.cid}')">组卷</button>
+        <button class="btn sm ghost" onclick="Stat.brush('${r.cid}')">刷本章</button></td></tr>`).join("")}</table>
+    <div class="muted" style="font-size:11px;margin-top:6px">「组卷」跳到模拟考试并预填该章抽题；「刷本章」直接进刷题页刷该章全部题。</div></div>`:""}
+  <div class="card"><h2 style="font-size:14px">按资料统计 <span class="muted" style="font-weight:400">（资料名 = 导入文件名/题库真实标题）</span></h2>
+    <table style="margin-top:8px"><tr><th>资料</th><th>题量</th><th>已刷</th><th>正确率</th></tr>
+    ${brows.map(([t,b])=>{ const a=b.d?Math.round(b.ok/b.d*100):null;
+      return `<tr><td>${esc(t)}</td><td>${b.n}</td><td>${b.d}</td>
+      <td style="background:${a===null?"":a>=70?"var(--ok-bg)":a>=40?"var(--warn-bg)":"var(--bad-bg)"}">${a===null?"—":a+"%"}</td></tr>`; }).join("")}</table></div>
+  ${ST.exams.length?`<div class="card"><h2 style="font-size:14px">模考成绩 vs 目标差距</h2>
+    ${tgt?`<div class="muted" style="font-size:11px;margin-bottom:6px">目标 ${tgt}% · 平均 ${_avg}% · 达标 ${ST.exams.filter(e=>e.acc>=tgt).length}/${ST.exams.length} 场${_exN?` · 距目标 ${tgt-_avg>0?"还差 "+(tgt-_avg):"超出 "+( _avg-tgt)} 个百分点`:""}</div>`:""}
+    ${_exSVG}
+    <div class="muted" style="font-size:10px;margin-top:4px">每场正确率（红虚线=目标），达标场次用主色；条形越长越接近/超过目标越好。</div></div>`:""}`;
 }
+const Stat={
+  setTarget(v){ ST.settings.targetAcc=Math.max(0,Math.min(100,+v||0)); Store.save("settings"); vStats(); },
+  // 薄弱章节 → 组卷: 预填自定义卷(该章 + 优先错题), 跳到模拟考试页
+  paper(cid){
+    const books=Object.fromEntries(bookMetaAll().map(b=>[b.tag,true]));
+    const m=bookOfCh(cid); if(m) Object.keys(books).forEach(k=>{ books[k]=(k===m.tag); });
+    const pool=Exam.qPoolCount(m?[m.tag]:Object.keys(books),[cid]);
+    if(!pool){ toast("该章节暂无可抽题目"); return; }
+    const types=[...new Set(allQ().filter(q=>q.chapterId===cid||q.chapterId.startsWith(cid+"-")).map(q=>q.type).filter(Boolean))];
+    Exam.custom={name:"薄弱章攻坚 · "+(IDX.ch[cid]||{}).title,duration:30,books,chapters:[cid],
+      sections:[{type:types.includes("single_choice")?"single_choice":(types[0]||"single_choice"),
+        count:Math.min(10,pool),scorePerQuestion:1,preferWrong:true}]};
+    location.hash="#exam"; toast("已预填该章组卷, 可直接开考");
+  },
+  // 薄弱章节 → 直接刷题
+  brush(cid){
+    Brush.f={book:(bookOfCh(cid)||{}).tag||"",ch:cid,mode:"seq",scope:"all",n:50};
+    buildQueue(); location.hash="#brush";
+    toast(Brush.queue.length?("已排入 "+Brush.queue.length+" 题"):"该章节暂无题目");
+  }
+};
 
 /* ================= 设置 + 同步 ================= */
 function vSet(){
@@ -1238,7 +1566,8 @@ function vSet(){
       <button class="btn sm ghost" onclick="Settings.sync(0)">拉取</button></div>
       <div class="muted" style="margin-top:8px">先在 Supabase SQL 编辑器建表:<br>
       <code>create table beikao_state(id text primary key, data jsonb, updated_at timestamptz default now());</code>
-      · 仅同步进度/错题/SRS/计划, 题库本体不上传。</div></div>
+      · 同步「进度/错题/SRS/计划/模考/资料库/视频/导入题库元数据」; <b>增量合并</b>(多设备各自进度合并, 不互相覆盖); 题库本体不上传。<br>
+      · 用法: 设备 A 推送 → 设备 B 拉取(合并) → B 再推送 → A 拉取, 即双向收敛。</div></div>
   <div class="card"><h2 style="font-size:14px">AI 接口 (用于智能学习计划)</h2>
     <div class="row" style="margin-top:8px;flex-wrap:wrap">
       <input id="set-aiurl" placeholder="OpenAI 兼容接口, 如 https://api.deepseek.com/v1" value="${esc((ST.settings.ai||{}).url||"")}" style="flex:2;min-width:260px">
@@ -1246,12 +1575,21 @@ function vSet(){
       <input id="set-aimodel" placeholder="模型名, 如 deepseek-chat" value="${esc((ST.settings.ai||{}).model||"")}" style="width:150px">
       <button class="btn sm" onclick="Settings.save()">保存</button></div>
     <div class="muted" style="margin-top:8px">支持任何 OpenAI 兼容接口 (DeepSeek / 硅基流动 / Kimi 等); Key 仅保存在本地浏览器, 不随同步上传。若提示跨域(CORS)失败, 请换支持浏览器直连的服务商。</div></div>
-  <div class="card"><h2 style="font-size:14px">数据管理</h2><div class="row" style="margin-top:8px">
-    <button class="btn sm ghost" onclick="Settings.exportAll()">导出全部进度 (JSON)</button>
-    <label class="btn sm ghost" style="cursor:pointer">导入进度<input type="file" accept=".json" style="display:none" onchange="Settings.importAll(this)"></label>
-    <button class="btn sm bad" onclick="if(confirm('确定清空全部本地进度?')){localStorage.clear();indexedDB.deleteDatabase('beikao');location.reload()}">重置全部</button></div></div>`;
+  <div class="card"><h2 style="font-size:14px">数据管理</h2><div class="row" style="margin-top:8px;flex-wrap:wrap">
+    <button class="btn sm ghost" onclick="Settings.exportAll(0)">导出进度 (JSON)</button>
+    <button class="btn sm ghost" onclick="Settings.exportAll(1)">导出完整备份（进度 + 导入题库）</button>
+    <label class="btn sm ghost" style="cursor:pointer">导入备份<input type="file" accept=".json" style="display:none" onchange="Settings.importAll(this)"></label>
+    <button class="btn sm bad" onclick="if(confirm('确定清空全部本地进度? 建议先导出备份。')){localStorage.clear();indexedDB.deleteDatabase('beikao');location.reload()}">重置全部</button></div>
+    <div class="muted" style="font-size:12px;margin-top:8px">${Settings.backupHint()}</div></div>`;
 }
 const Settings={
+  backupHint(){
+    const lb=ST.settings.lastBackup;
+    const imps=Imports.all().length;
+    if(!lb) return `尚未备份过${imps?"（当前有 "+imps+" 份导入题库，建议用「完整备份」导出，否则换设备/清缓存后需重新导入）":""}。`;
+    const days=Math.round((Date.now()-new Date(lb+"T00:00:00").getTime())/864e5);
+    return `上次备份：${lb}（${days} 天前）${days>=7?' · <b style="color:#c0392b">建议重新备份</b>':""}${imps?" · 含 "+imps+" 份导入题库":""}`;
+  },
   save(){ ST.settings.theme=$("#set-theme").value;
     ST.settings.supabaseUrl=$("#set-sburl").value.trim();
     ST.settings.supabaseKey=$("#set-sbkey").value.trim();
@@ -1263,25 +1601,55 @@ const Settings={
       const {createClient}=await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm");
       const sb=createClient(ST.settings.supabaseUrl,ST.settings.supabaseKey);
       if(push){
-        const data={}; SKEYS.forEach(k=>data[k]=ST[k]);
+        const data=Sync.pushPayload();
         const {error}=await sb.from("beikao_state").upsert({id:"local",data,updated_at:new Date().toISOString()});
-        if(error) throw error; toast("已推送到云端");
+        if(error) throw error; toast("已增量同步(含导入题库)到云端");
       }else{
         const {data,error}=await sb.from("beikao_state").select("data").eq("id","local").single();
         if(error) throw error;
-        SKEYS.forEach(k=>{ if(data.data&&data.data[k]) ST[k]=data.data[k]; });
-        await Store.saveAll(); toast("已从云端拉取"); location.reload();
+        const payload=(data&&data.data)?data.data:data;
+        Sync.pull(payload);
+        await Store.saveAll(); toast("已从云端合并到本机(增量, 不覆盖本地进度)"); location.reload();
       }
     }catch(e){ toast("同步失败: "+e.message); }
   },
-  exportAll(){ const out={}; SKEYS.forEach(k=>out[k]=ST[k]); download("beikao-progress.json",JSON.stringify(out,null,1),"application/json"); },
-  importAll(inp){
-    const f=inp.files[0]; if(!f)return; const r=new FileReader();
-    r.onload=async()=>{ try{ const d=JSON.parse(r.result);
-      for(const k of SKEYS) if(d[k]) ST[k]=d[k];
-      await Store.saveAll(); toast("导入成功"); location.reload();
-    }catch(e){toast("文件解析失败");} };
-    r.readAsText(f);
+  /* 备份格式 v2: {app, v, date, data:{...SKEYS}, imports:[...]}
+     - 进度备份: 体积小(通常 <1MB); 完整备份额外带上导入的题库 JSON(可能几十 MB) */
+  exportAll(withImports){
+    const out={app:"beikao",v:2,date:new Date().toISOString(),data:{}};
+    SKEYS.forEach(k=>out.data[k]=ST[k]);
+    if(withImports) out.imports=Imports.all();
+    const txt=JSON.stringify(out);
+    download("beikao-backup-"+today().replace(/-/g,"")+(withImports?"-full":"")+".json",txt,"application/json");
+    ST.settings.lastBackup=today(); Store.save("settings");
+    toast("已导出 "+(txt.length/1048576).toFixed(2)+"MB"+(withImports?"（含 "+out.imports.length+" 份导入资料）":""));
+    if(location.hash==="#set") vSet();
+  },
+  async importAll(inp){
+    const f=inp.files&&inp.files[0]; if(!f) return; inp.value="";
+    let d=null;
+    try{ d=JSON.parse(await f.text()); }catch(e){ toast("文件解析失败"); return; }
+    const body=(d&&d.data&&typeof d.data==="object")?d.data:d;      // 兼容旧版扁平格式
+    const imps=Array.isArray(d&&d.imports)?d.imports:[];
+    if(!SKEYS.some(k=>body[k]!==undefined)&&!imps.length){ toast("文件中没有可识别的备考数据"); return; }
+    const mode=await ask(`导入 <b>${esc(f.name)}</b><br>
+      进度：${Object.keys(body).filter(k=>SKEYS.includes(k)).join("/")||"无"}${imps.length?`<br>含导入题库 <b>${imps.length}</b> 份`:""}
+      <br><br>选择导入方式：`,
+      [{label:"合并（保留现有, 导入优先）",val:"merge"},{label:"全量覆盖（清空后写入）",val:"replace",cls:"bad"},{label:"取消",val:"",cls:"ghost"}]);
+    if(!mode) return;
+    if(mode==="replace") SKEYS.forEach(k=>{ const def=ST_DEF[k];
+      ST[k]= (def===undefined) ? (k==="exams"||k==="videos"?[]:{}) : JSON.parse(JSON.stringify(def)); });
+    SKEYS.forEach(k=>{ if(body[k]!==undefined) ST[k]=body[k]; });
+    ST.settings=Object.assign({examDate:"",dailyNew:20,dailyBrush:50,theme:"light",supabaseUrl:"",supabaseKey:""},ST.settings);
+    let addImp=0;
+    if(imps.length){
+      const cur=Imports.all(), names=new Set(cur.map(x=>x.name));
+      imps.forEach(im=>{ if(im&&im.name&&!names.has(im.name)){ cur.push(im); names.add(im.name); addImp++; } });
+      if(addImp) Imports._save(cur);
+    }
+    await Store.saveAll();
+    toast("导入成功"+(addImp?(" · 恢复 "+addImp+" 份导入资料"):"")+", 正在重载…");
+    setTimeout(()=>location.reload(),700);
   }
 };
 
@@ -1591,7 +1959,12 @@ const Imports={
     readNext([...files],()=>{ if(added&&this._save(list)){ toast("已导入 "+added+" 份资料, 正在合并…"); setTimeout(()=>location.reload(),600); } });
   },
   del(i){ const l=this.all(); l.splice(i,1);
-    if(this._save(l)){ toast("已删除"); setTimeout(()=>location.reload(),400); } }
+    if(this._save(l)){ toast("已删除"); setTimeout(()=>location.reload(),400); } },
+  // 云端拉取时合并导入元数据: 按文件名去重(本机优先, 同名不覆盖), 返回新增条数
+  mergeList(list){ if(!Array.isArray(list)||!list.length) return 0;
+    const cur=this.all(); const names=new Set(cur.map(x=>x.name)); let added=0;
+    list.forEach(x=>{ if(x&&x.name&&!names.has(x.name)){ cur.push(x); names.add(x.name); added++; } });
+    if(added) this._save(cur); return added; }
 };
 
 /* ================= 启动 ================= */
@@ -1600,6 +1973,11 @@ const Imports={
   Imports.apply();
   buildIndexes();
   route();
+  /* PWA: 注册 Service Worker (网络优先, 只做离线兜底, 不会缓存旧版页面);
+     本地 file:// 打开或浏览器不支持时静默跳过 */
+  if("serviceWorker" in navigator && location.protocol!=="file:"){
+    try{ navigator.serviceWorker.register("./sw.js",{scope:"./"}).catch(()=>{}); }catch(e){}
+  }
 })();
 </script>
 </body>

@@ -1,0 +1,16 @@
+{
+  "name": "备考工作台 · 注册环保工程师",
+  "short_name": "备考",
+  "description": "个人备考复习应用：刷题 / 模考 / 闪卡 / 错题 / 计划 / 资料库",
+  "lang": "zh-CN",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f4f5fb",
+  "theme_color": "#5b5ce2",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
