@@ -195,7 +195,7 @@ function bookOfCh(cid){ if(!cid) return null;
   return null; }
 
 /* ================= 本地存储 (IndexedDB + localStorage 兜底) ================= */
-const ST = {progress:{}, srs:{}, settings:{examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,
+const ST = {progress:{}, srs:{}, cardBoost:{}, settings:{examDate:"",examName:"注册环保工程师·基础考试",dailyNew:30,dailyBrush:50,
   weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,targetScore:132,subjMigrated:false,learnRatio:{base:60,mid:40,sprint:15},
   supabaseUrl:"",supabaseKey:""}, plan:{}, exams:[], examTemplates:[], holidays:[], syllabus:[], taskDays:{}, holidayCache:{},
   overrides:{}, daily:{}, lib:{read:{},time:{},excerpts:[]}, treeMerges:{}, videos:[]};
@@ -1137,8 +1137,8 @@ function splitKpPoints(ct){
 }
 /* 小点的「引导语」: 去行首编号后取第一个分句, 作为卡片正面的问题线索 */
 function kpPointLead(pt){
-  let t=String(pt||"").trim().replace(_KP_HEAD_STRIP,"");
-  const cut=t.search(/[:：,，;；。()（）]/);
+  let t=String(pt||"").trim().replace(_KP_HEAD_STRIP,"").replace(/\$[^$]*\$/g," ");  // 剥掉公式, 避免正面混入 LaTeX
+  const cut=t.search(/[:：,，;；。()（）=＝]/);   // 等号/括号处也截断, 方程类点不把式子带进正面线索
   let lead=(cut>1?t.slice(0,cut):t).trim();
   if(lead.length>22) lead=lead.slice(0,21)+"…";
   return lead;
@@ -1172,6 +1172,35 @@ function kpClozeTarget(pt){
   if(front===body||/^\s*▢/.test(front)||front.length<8) return null;   // 无上下文线索的残片不出卡
   return {front,back:c.t};
 }
+/* 知识点按「知识类型」分层: 纯记忆 memory / 公式计算 formula / 理解型 understand
+   —— 对应主动回忆 + 间隔重复的底层原理, 让不同科目闪卡都能最高效留存 */
+function kpTypeOf(pt){
+  const t=String(pt||"");
+  // 理解型: 显式对比/辨析/原因类(且无公式承载) → 结构化差异 + 易错提示
+  if(/(区别|差异|比较|不同于|对比|相同点|不同点|相同与不同|[Vv][Ss]|辨析|误区|易错|为什么|原因|本质|关系|核心思想|如何理解|含义|意义|特点|联系)/.test(t) && !/^\s*\$/.test(t.slice(0,2))) return "understand";
+  // 公式计算: 含 LaTeX 公式, 或含方程结构(= / ²³√ / 坐标模等关键词) —— 把「纯文本方程」(如二次曲面)也归为公式类
+  const plain=t.replace(/\$[^$]*\$/g," ");
+  if(/\$/.test(t) || /[=＝]/.test(plain) || /[²³√×÷∂]/.test(plain) || /(公式|定理|法则|定律|性质|规律|方程|求导|积分|推导|坐标|模长|夹角|投影)/.test(plain)) return "formula";
+  return "memory";
+}
+function kpFormulaName(pt){
+  const t=String(pt||"").replace(_KP_HEAD_STRIP,"").replace(/\$[^$]*\$/g," ").replace(/\s+/g," ").trim();  // 去掉公式与多余空白
+  let name=(t.split(/[。；;：:]/)[0]||"").trim();
+  const m=name.match(/^([^，,。；;]{1,18}?)(方程|公式|定理|法则|定律|性质|坐标|模|夹角)/);
+  return (m?m[0]:name).slice(0,18);
+}
+function kpFormulaScenario(pt){
+  const t=String(pt||"").replace(/\$[^$]*\$/g,"").replace(/\s+/g," ");  // 先剥掉公式, 避免场景提示里混入 LaTeX
+  let m=t.match(/适用于([^。；;，,]{1,14})/); if(m) return "适用于"+m[1];
+  if((m=t.match(/当([^。；;，,]{1,12})时/))) return "当"+m[1]+"时";
+  return "";
+}
+function kpAnchorLine(pt){   // 取「注：…」或尾部括号注记作为推导/记忆锚点
+  const t=String(pt||"");
+  let m=t.match(/注[：:]\s*([^。；;]{4,60})/); if(m) return m[1].trim();
+  m=t.match(/（([^）]{4,40})）\s*$/); if(m) return m[1].trim();
+  return "";
+}
 function allCards(){
   const isNum=t=>/^\d+(\.\d+)*$/.test(String(t||"").trim());
   const cCards=[], bCards=[], cards=[];
@@ -1185,15 +1214,47 @@ function allCards(){
     const ct=(kp.content||"").trim();
     if(!ct||isNum(kp.title)) continue;          // 空壳/纯编号骨架节点不入卡池
     if(kp.sourceBook==="C"){
-      // 按编号小点拆卡(支持行内连排编号); 正面=「标题 · 小点引导语」, 首点沿用 kc:<id> 保持与知识树联动
+      // 按编号小点拆卡(支持行内连排编号); 按「知识类型」分层生成卡片(纯记忆/公式计算/理解型)
       const pts=splitKpPoints(ct);
       pts.forEach((pt,i)=>{
-        const id=i===0?"kc:"+kp.id:("kc:"+kp.id+"#"+i);
+        const id=i===0?"kc:"+kp.id:("kc:"+kp.id+"#"+i);   // 首点沿用 kc:<id> 保持与知识树「生成复习卡」联动
         const lead=kpPointLead(pt);
-        const front=(pts.length>1&&lead&&lead!==kp.title)?`${kp.title} · ${lead}`:(pts.length>1?`${kp.title} (${i+1}/${pts.length})`:kp.title);
-        cCards.push({id,type:"kp",front,back:pt,kpId:kp.id,ch:kp.chapterId});
+        const klass=kpTypeOf(pt);
+        const _body=String(pt).replace(/\$[^$]*\$/g," ").replace(_KP_HEAD_STRIP,"").replace(/\s+/g,"").trim();
+        // 仅标题无正文的提纲点(如「(1) 向量的概念」)不入记忆/理解卡, 避免正面=背面
+        if((klass==="memory"||klass==="understand")&&(_body===lead||_body.length<=lead.length+1)) return;
+        let front, back;
+        if(klass==="formula"){
+          // 公式计算类: 正面=公式名+适用场景提问; 背面=公式本体+1句推导/记忆锚点(+1道极简示例)
+          const name=kpFormulaName(pt), sc=kpFormulaScenario(pt);
+          front=(kp.title+" · "+name+(sc?"（"+sc+"）":"")+" 公式").replace(/\s+/g,"")+"？";
+          const fmAll=String(pt).match(/\$[^$]+\$/g)||[];
+          const fm=[fmAll.sort((a,b)=>b.length-a.length)[0]].filter(Boolean);   // 取最长的一个作主公式, 避免把整段公式堆在背面
+          const anchor=kpAnchorLine(pt);
+          const ex=(String(pt).match(/例[：:]\s*([^。；;]{4,40})/)||[])[1]||"";
+          const bodyClean=String(pt).replace(/\$[^$]*\$/g," ").replace(_KP_HEAD_STRIP,"").replace(/\s+/g," ").trim();
+          back=[name?name+"：":"", fm.join("  "), anchor?("推导/记忆锚点: "+anchor):"", ex?("示例: "+ex):""].filter(Boolean).join("<br>")||bodyClean||pt;
+          cCards.push({id,type:"kp",klass:"formula",front,back,kpId:kp.id,ch:kp.chapterId});
+          // 推导子卡: 把「注」里的关键一步单独拆出, 避免跳过理解死记
+          if(anchor&&anchor.length>6&&anchor.length<60)
+            cCards.push({id:"dv:"+kp.id+":"+i,type:"kp",klass:"derive",front:"推导理解: "+name+" 的关键一步是？",back:anchor,kpId:kp.id,ch:kp.chapterId});
+        }else if(klass==="understand"){
+          // 理解型: 正面=引导性辨析问题; 背面=结构化差异条目+1条易错提示
+          front=(kp.title+" · "+(lead||kp.title)+" 如何区分").replace(/\s+/g,"")+"？";
+          const anchor=kpAnchorLine(pt);
+          const clauses=String(pt).replace(_KP_HEAD_STRIP,"").split(/[。；;]/).map(s=>s.trim()).filter(Boolean)
+            .filter(c=>!anchor||c.replace(/^注[：:]?\s*/,"")!==anchor);   // 避免「注:…」同时出现在条目和易错提示里
+          const list=clauses.map(c=>"• "+c).join("<br>");
+          back=[list, anchor?("易错提示: "+anchor):""].filter(Boolean).join("<br>");
+          cCards.push({id,type:"kp",klass:"understand",front,back,kpId:kp.id,ch:kp.chapterId});
+        }else{
+          // 纯记忆类: 正面=精准记忆线索; 背面=唯一标准答案+1条关联细节(正文其余部分即关联细节)
+          front=(kp.title+" · "+(lead||kp.title)).replace(/\s+/g,"")+"？";
+          cCards.push({id,type:"kp",klass:"memory",front,back:pt,kpId:kp.id,ch:kp.chapterId});
+        }
+        // 填空卡: 公式点挖公式符号, 记忆点挖关键数字 —— 单卡单点、主动回忆
         const cz=kpClozeTarget(pt);
-        if(cz) cCards.push({id:`cl:${kp.id}:${i}`,type:"cloze",front:cz.front,back:cz.back,kpId:kp.id,ch:kp.chapterId});
+        if(cz) cCards.push({id:"cl:"+kp.id+":"+i,type:"cloze",klass,front:cz.front,back:cz.back,kpId:kp.id,ch:kp.chapterId});
       });
     }else{
       // B 书仅有考点提纲; 该章已被 C 具体知识点覆盖时跳过, 避免提纲卡刷屏
@@ -1210,6 +1271,14 @@ function allCards(){
         back:`答案 ${q.answer.resolved||"待校对"}<br>${esc(q.analysis||"")}`,qid:q.id,ch:q.chapterId});
     }
   }
+  // AI 优化覆盖: 用户点「✨ AI 优化闪卡」后写入 ST.cardBoost[id], 此处合并(本地/同步均可)
+  const boost=ST.cardBoost||{};
+  if(Object.keys(boost).length){
+    for(const c of cards){ const b=boost[c.id]; if(!b) continue;
+      if(b.front) c.front=b.front;
+      if(b.back) c.back=b.back;
+      if(b.klass) c.klass=b.klass; }
+  }
   return cards;
 }
 function dueCards(){
@@ -1225,7 +1294,7 @@ function newCards(limit){
 const Cards={queue:null,cur:null,show:false};
 function vCards(){
   const el=$("#main"); Cards.queue=null;
-  const due=dueCards().length, fresh=Math.min(+ST.settings.dailyNew||20,newCards(9999).length);
+  const due=dueCards().length, fresh=Math.min(+ST.settings.dailyNew||30,newCards(9999).length);
   const eb=ST.settings.srsMode==="eb";
   el.innerHTML=`<h2>闪卡背诵 <span class="muted" style="font-size:12px">${eb?"艾宾浩斯固定间隔":"SM-2 自适应"}</span></h2>
   <div class="card"><div class="kv">
@@ -1238,7 +1307,8 @@ function vCards(){
         <option value="sm2" ${!eb?"selected":""}>SM-2 自适应</option>
         <option value="eb" ${eb?"selected":""}>艾宾浩斯固定间隔</option></select>
       <button class="btn" onclick="Cards.start()">开始背诵</button>
-      <span class="muted">评分: 1 忘记 · 2 困难 · 3 良好 · 4 简单 (键盘 1-4)</span></div>
+      <span class="muted">评分: 1 忘记 · 2 困难 · 3 良好 · 4 简单 (键盘 1-4)</span>
+      <span class="muted" style="font-size:11px">· 每日新卡建议 30–50 张，超出海马体记忆效率反而下降</span></div>
     ${eb?`<div class="muted" style="margin-top:6px;font-size:12px">记忆曲线节点: 学后第 ${EB.join(" / ")} 天各复习一次；评「记得」推进下一节点，评「忘了」回到首节点重学。</div>`
       :`<div class="muted" style="margin-top:6px;font-size:12px">SM-2 按你的评分动态调整复习间隔，记得越牢间隔越长。</div>`}
   </div>
@@ -1266,21 +1336,50 @@ Cards.browse=function(){
   if(sid){ const sj=Plan.syllabus().find(x=>x.id===sid); const chs=new Set((sj?sj.chapters:[]).map(Plan.topCh));
     cards=cards.filter(c=>chs.has(Plan.topCh(c.ch||""))); }
   const typeName={kp:"知识卡",cloze:"填空卡",wrong:"错题卡",outline:"考点提纲卡"};
+  const klassName={formula:"公式卡",memory:"记忆卡",understand:"理解卡",derive:"推导卡"};
   const rows=cards.map(c=>`<div class="list-row" style="cursor:pointer" onclick="Cards.showCard(this)">
-      <div class="grow"><span class="tag" style="font-size:10px;margin-right:6px">${typeName[c.type]||c.type}</span>${esc((c.front||"").slice(0,70))}</div>
-      <div class="muted" style="font-size:11px;white-space:nowrap;margin-left:8px">${esc(chapPath(c.ch))}</div></div>
+      <div class="grow"><span class="tag" style="font-size:10px;margin-right:6px">${c.klass?klassName[c.klass]:(typeName[c.type]||c.type)}</span>${esc((c.front||"").slice(0,64))}</div>
+      <div class="row" style="gap:4px;margin-left:8px">
+        <button class="btn sm ghost" onclick="event.stopPropagation();Cards.aiBoost('${c.id.replace(/'/g,"\\'")}')" title="用 AI 按类型优化这张卡">✨</button>
+        <span class="muted" style="font-size:11px;white-space:nowrap">${esc(chapPath(c.ch))}</span></div></div>
     <div class="card-back" style="display:none;padding:6px 12px 8px;white-space:pre-wrap;line-height:1.6;color:var(--tx2)">${esc(c.back||"")}</div>`).join("");
   box.innerHTML=rows||'<span class="muted">没有匹配的卡片</span>';
   renderMath(box);
   const cnt=$("#cards-cnt"); if(cnt) cnt.textContent="共 "+cards.length+" 张";
 };
 Cards.showCard=function(row){ const back=row.nextElementSibling; if(back&&back.classList.contains("card-back")) back.style.display=back.style.display==="none"?"block":"none"; };
+/* ✨ AI 优化单张闪卡: 按卡片类型调用 AI 补强(公式→推导/示例/口诀; 理解→对比/误区; 记忆→关联锚点; 填空→情境), 结果写入 ST.cardBoost[id] 持久化 */
+Cards.aiBoost=async function(cardId){
+  const c=allCards().find(x=>x.id===cardId); if(!c){ toast("未找到该卡片"); return; }
+  const klassName={formula:"公式计算类",memory:"纯记忆类",understand:"理解型",derive:"推导类",cloze:"填空类",wrong:"错题类",outline:"考点提纲类"};
+  const spec={
+    formula:"你是备考闪卡优化助手。针对【公式计算类】知识点, 请输出 JSON: {\"front\":\"一句提问(公式名称+适用场景, 不超过24字)\", \"back\":\"公式本体(用 $...$ LaTeX 书写)+换行+1句推导/记忆逻辑+换行+1道极简典型题示例(只写式子或一句话)\", \"klass\":\"formula\"}。不要解释, 只输出 JSON。",
+    understand:"你是备考闪卡优化助手。针对【理解型】知识点, 请输出 JSON: {\"front\":\"一句辨析/引导问题(不超过24字)\", \"back\":\"用 • 开头的 2-4 条结构化差异点+换行+1条易错提示(以『易错:』开头)\", \"klass\":\"understand\"}。不要解释, 只输出 JSON。",
+    memory:"你是备考闪卡优化助手。针对【纯记忆类】知识点, 请输出 JSON: {\"front\":\"一句精准记忆线索提问(不超过22字)\", \"back\":\"唯一标准答案(1-2句)+换行+1条关联细节锚点\", \"klass\":\"memory\"}。不要解释, 只输出 JSON。",
+    cloze:"你是备考闪卡优化助手。针对【填空类】知识点, 请输出 JSON: {\"front\":\"带 ▢▢▢ 的句子(一句, 不超过40字)\", \"back\":\"▢ 处应填的内容\", \"klass\":\"cloze\"}。不要解释, 只输出 JSON。",
+    outline:"你是备考闪卡优化助手。针对【考点提纲类】知识点, 请输出 JSON: {\"front\":\"一句提问(不超过22字)\", \"back\":\"3-5 个要点(用 • 开头, 每条一行)\", \"klass\":\"outline\"}。不要解释, 只输出 JSON。"
+  };
+  const prompt=(spec[c.klass]||spec.memory)+"\n\n【原始内容】\n正面: "+(c.front||"")+"\n背面: "+(c.back||"");
+  toast("AI 正在优化「"+(klassName[c.klass]||"")+"」卡片…");
+  try{
+    const j=await aiChat(prompt,{temperature:0.3,timeout:120000});
+    const txt=aiTxt(j); const m=txt.match(/\{[\s\S]*\}/);
+    if(!m) throw new Error("AI 返回无法解析");
+    const o=JSON.parse(m[0]);
+    if(!o.front||!o.back) throw new Error("AI 返回缺少字段");
+    ST.cardBoost=ST.cardBoost||{};
+    ST.cardBoost[cardId]={front:String(o.front).slice(0,120),back:String(o.back).slice(0,400),klass:o.klass||c.klass};
+    Store.save("cardBoost");
+    toast("已用 AI 优化该卡片(下次复习生效)");
+    if(location.hash==="#cards") Cards.browse();
+  }catch(e){ toast("AI 优化失败: "+String(e.message||e)); }
+};
 Cards.setMode=function(m){
   ST.settings.srsMode=m; Store.save("settings"); vCards();
   toast(m==="eb"?"已切换: 艾宾浩斯固定间隔":""+("已切换: SM-2 自适应"));
 };
 Cards.start=function(){
-  const d=dueCards(); const n=newCards(Math.max(0,(+ST.settings.dailyNew||20)-0));
+  const d=dueCards(); const n=newCards(Math.max(0,(+ST.settings.dailyNew||30)-0));
   Cards.queue=d.concat(n); Cards.show=false;
   if(!Cards.queue.length){ $("#card-area").innerHTML='<div class="card">今天没有到期的卡片, 可明日再来或调大"每日新卡数"。</div>'; return; }
   Cards.next();
@@ -1291,17 +1390,16 @@ Cards.next=function(){
 };
 Cards.draw=function(){
   const c=Cards.cur; const area=$("#card-area");
-  const label=c.type==="cloze"?"填空卡":c.type==="wrong"?"错题卡":c.type==="outline"?"考点提纲卡":"知识卡";
-  area.innerHTML=`<div class="card flash" onclick="Cards.flip()"><div class="inner" id="card-inner">
-    ${Cards.show? `<div class="muted" style="margin-bottom:8px">${esc(chapPath(c.ch))} · ${label}${c.type==="outline"?" · 该章节具体知识点见知识树":""}</div>${c.back}`
-      : `<div class="muted" style="margin-bottom:8px">${esc(chapPath(c.ch))} · ${label}</div><div class="q-title">${esc(c.front)}</div>
-         <div class="muted" style="margin-top:14px">点击或按空格 显示答案</div>`}</div></div>
-  ${Cards.show?`<div class="grade">
-    <button class="btn bad" onclick="Cards.grade(1)">忘记</button>
-    <button class="btn gray" onclick="Cards.grade(2)">困难</button>
-    <button class="btn" onclick="Cards.grade(3)">良好</button>
-    <button class="btn ok" onclick="Cards.grade(4)">简单</button></div>`:""}
-  ${ST.settings.srsMode==="eb"&&Cards.ebSchedule(c.id)?`<div class="muted" style="margin-top:10px">记忆曲线: ${Cards.ebSchedule(c.id).map(n=>`<span style="${n.done?'color:var(--ok)':n.next?'color:var(--pri);font-weight:600':'color:var(--tx2)'};margin-right:6px">${n.done?'✔':n.next?'▶':'○'}D+${n.day}</span>`).join("")}</div>`:""}`;
+  const klassName={formula:"公式卡",memory:"记忆卡",understand:"理解卡",derive:"推导卡"};
+  const label=c.klass?klassName[c.klass]:(c.type==="cloze"?"填空卡":c.type==="wrong"?"错题卡":c.type==="outline"?"考点提纲卡":"知识卡");
+  const head=`<div class="muted" style="margin-bottom:8px">${esc(chapPath(c.ch))} · ${label}${c.type==="outline"?" · 该章节具体知识点见知识树":""}</div>`;
+  const boosted=(ST.cardBoost&&ST.cardBoost[c.id])?'<div class="muted" style="margin-top:6px;font-size:11px">✨ 已用 AI 优化</div>':"";
+  const inner=Cards.show
+    ? head+'<div style="white-space:pre-wrap;line-height:1.7">'+c.back+'</div>'+boosted
+    : head+'<div class="q-title">'+esc(c.front)+'</div><div class="muted" style="margin-top:14px">点击或按空格 显示答案</div>';
+  area.innerHTML='<div class="card flash" onclick="Cards.flip()"><div class="inner" id="card-inner">'+inner+'</div></div>'
+    +(Cards.show?'<div class="grade"><button class="btn bad" onclick="Cards.grade(1)">忘记</button><button class="btn gray" onclick="Cards.grade(2)">困难</button><button class="btn" onclick="Cards.grade(3)">良好</button><button class="btn ok" onclick="Cards.grade(4)">简单</button></div>':"")
+    +(ST.settings.srsMode==="eb"&&Cards.ebSchedule(c.id)?'<div class="muted" style="margin-top:10px">记忆曲线: '+Cards.ebSchedule(c.id).map(n=>'<span style="'+(n.done?'color:var(--ok)':n.next?'color:var(--pri);font-weight:600':'color:var(--tx2)')+';margin-right:6px">'+(n.done?'✔':n.next?'▶':'○')+'D+'+n.day+'</span>').join("")+'</div>':"");
   renderMath(area);
 };
 Cards.flip=function(){ if(!Cards.cur)return; Cards.show=true; Cards.draw(); };
@@ -1551,6 +1649,7 @@ const Tree={
       ${(kp.tags||[]).length?`<div class="row" style="flex-wrap:wrap;gap:6px;margin-top:4px">${kp.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</div>`:""}
       ${kp.sourcePage?`<div class="muted" style="margin-top:6px;font-size:12px">出处: ${esc(kp.sourceBook||"")} p${esc(kp.sourcePage)}</div>`:""}
       <div class="row" style="margin-top:10px"><button class="btn sm" onclick="Tree.review('${id.replace(/"/g,"")}')">生成今日复习卡</button>
+        <button class="btn sm ghost" onclick="Cards.aiBoost('kc:${id.replace(/"/g,"")}')" title="用 AI 按知识点类型优化其主卡">✨ AI 优化主卡</button>
         <span class="muted" style="font-size:11px;align-self:center" id="tree-card-n"></span></div></div>`;
     renderMath(box); box.scrollIntoView({behavior:"smooth"});
   },

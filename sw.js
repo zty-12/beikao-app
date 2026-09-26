@@ -4,7 +4,7 @@
    - 平时刷新: 立即命中缓存, 秒开;
    - 后台拉新版写入缓存, 下次打开自动生效 —— 同时兼顾「改了要生效」与「刷新要快」。
    版本号由 scripts/build_app.py 注入(beikao-<git-sha>), 每次部署自动失效旧缓存、拉取新资源。 */
-const CACHE = "beikao-1790422830";
+const CACHE = "beikao-1790424851";
 
 self.addEventListener("install", e => self.skipWaiting());
 self.addEventListener("activate", e => {
