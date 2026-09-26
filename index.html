@@ -3361,7 +3361,8 @@ const Settings={
     if(!cfg.url||!cfg.key){ toast("请先填写接口地址与密钥"); return; }
     toast("测试连接中…");
     try{
-      const j=await aiChat("连接测试,只回复两个字母: ok",{temperature:0,timeout:30000,max_tokens:8});
+      /* 不传 max_tokens: 推理模型(如商汤 deepseek-v4-flash)会先把配额花在思考内容上, 限 8 必然空正文 */
+      const j=await aiChat("连接测试,只回复两个字母: ok",{temperature:0,timeout:60000});
       const t=aiTxt(j);
       toast("✅ 连接成功"+(t?(" · 模型回复: "+t.slice(0,40)):""));
     }catch(e){ toast("❌ "+String(e.message||e).slice(0,150)); }
