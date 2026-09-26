@@ -459,13 +459,22 @@ function vHome(){
 const Brush={f:{book:"",ch:"",mode:"seq",scope:"all",n:50},queue:[],pos:0,showA:false,autoT:null,keyHandler:null};
 if(ST.settings.bankFilter) Brush.f.book=ST.settings.bankFilter;  // 多设备/跨会话记住题库范围
 Brush.toggleImg=function(btn){const d=btn.nextElementSibling;if(d)d.style.display=d.style.display==="none"?"block":"none";};
-Brush.imgFail=function(el,label){   // 图片加载失败: 给出明确提示而非静默消失
+Brush.imgFail=function(el,label){   // 图片加载失败: 给出明确提示 + 一键清 SW 缓存强刷(线上多数是旧缓存引用旧文件名)
   const d=document.createElement("div"); d.className="muted";
   d.style.cssText="margin:8px 0;font-size:12px;border:1px dashed rgba(128,128,128,.4);border-radius:8px;padding:8px";
-  d.textContent=label+(_LOCAL
+  d.innerHTML=esc(label)+(_LOCAL
     ? "加载失败 — 本地 data 目录缺少该图片文件"
-    : "未加载成功 — 请先 Ctrl+F5 强制刷新清缓存；若仍失败说明该图尚未部署到线上（原题页整页图需 WebP 压缩版部署后才能在线查看）");
+    : "未加载成功 — 多为浏览器缓存了旧版数据所致, 点下方按钮一键修复; 清缓存后仍失败才是该图未部署")+
+    '<br><button class="btn sm ghost" style="margin-top:6px" onclick="Brush.purgeCache()">🔄 清除缓存并强制刷新</button>';
   el.replaceWith(d); };
+/* 清掉全部 Cache Storage 缓存后强刷 (保留 SW 注册, 刷新后按新版本重新缓存) */
+Brush.purgeCache=function(){
+  const done=()=>{ toast("缓存已清除, 正在刷新…"); setTimeout(()=>location.reload(),300); };
+  try{
+    if(window.caches&&caches.keys) caches.keys().then(ks=>Promise.all(ks.map(k=>caches.delete(k)))).then(done).catch(done);
+    else done();
+  }catch(e){ location.reload(); }
+};
 Brush.clearAuto=function(){if(Brush.autoT){clearTimeout(Brush.autoT);Brush.autoT=null;}};
 function buildQueue(){
   const f=Brush.f; let qs=allQ().filter(q=>q.stem&&q.options&&q.options.length>=2&&!q.incomplete);
@@ -1094,18 +1103,74 @@ Exam.submit=function(){
 /* ================= 闪卡 + SRS (SM-2 / 艾宾浩斯) ================= */
 /* 艾宾浩斯遗忘曲线固定复习节点(天): 学后第 1/2/4/7/15/30/90/180 天各复习一次 */
 const EB=[1,2,4,7,15,30,90,180];
-/* 把知识点正文按「编号小点」拆成多张卡: 1. / （一） / a. / 1、 等作为小点起点, 其余行并入上一小点 */
+/* ---- 知识点正文 → 卡片 的拆解工具 ----
+   编号形态: 1. / 1、 / (1) / （一） / a. / ① — 行首或行内连排均可 */
+const _KP_HEAD=/^(\d{1,2}\s*[.、)）]|[（(]\d{1,2}[)）]|[（(]?[一二三四五六七八九十]{1,3}\s*[、.）)]|[a-zA-Z]\s*[.、)）]|[①②③④⑤⑥⑦⑧⑨⑩])/;
+const _KP_HEAD_STRIP=/^(\d{1,2}\s*[.、)）]\s*|[（(]\d{1,2}[)）]\s*|[（(]?[一二三四五六七八九十]{1,3}\s*[、.）)]\s*|[a-zA-Z]\s*[.、)）]\s*|[①②③④⑤⑥⑦⑧⑨⑩]\s*)/;
+/* ① 按行拆(行首编号起新点); ② 单段过长且行内连排 ≥2 个编号时再细拆 */
 function splitKpPoints(ct){
   const lines=String(ct||"").split(/\n+/).map(s=>s.trim()).filter(Boolean);
-  if(lines.length<=1) return [ct];
-  const head=/^(\d+[.、)）]|[（(]\d+[)）]|[a-zA-Z][.、)）])/;
-  const pts=[]; let cur=null;
+  const groups=[]; let cur=null;
   for(const ln of lines){
-    if(head.test(ln)){ if(cur!==null) pts.push(cur); cur=ln; }
+    if(_KP_HEAD.test(ln)){ if(cur!==null) groups.push(cur); cur=ln; }
     else cur=(cur===null)?ln:(cur+"\n"+ln);
   }
-  if(cur!==null) pts.push(cur);
-  return pts.length?pts:[ct];
+  if(cur!==null) groups.push(cur);
+  if(!groups.length) return [String(ct||"").trim()];
+  const out=[];
+  for(const g of groups){
+    if(g.length>60){
+      const marks=[...g.matchAll(/[（(]\d{1,2}[)）]|[①②③④⑤⑥⑦⑧⑨⑩]/g)];
+      if(marks.length>=2&&marks[0].index<8){
+        const parts=[];
+        for(let i=0;i<marks.length;i++){
+          const s=marks[i].index, e=i+1<marks.length?marks[i+1].index:g.length;
+          const t=g.slice(s,e).trim(); if(t) parts.push(t);
+        }
+        const pre=g.slice(0,marks[0].index).trim(); if(pre) parts.unshift(pre);
+        if(parts.length>1){ out.push(...parts); continue; }
+      }
+    }
+    out.push(g);
+  }
+  return out.length?out:[String(ct||"").trim()];
+}
+/* 小点的「引导语」: 去行首编号后取第一个分句, 作为卡片正面的问题线索 */
+function kpPointLead(pt){
+  let t=String(pt||"").trim().replace(_KP_HEAD_STRIP,"");
+  const cut=t.search(/[:：,，;；。()（）]/);
+  let lead=(cut>1?t.slice(0,cut):t).trim();
+  if(lead.length>22) lead=lead.slice(0,21)+"…";
+  return lead;
+}
+/* 填空目标: 只挖「正文里的公式/数字」, 先剥掉行首枚举标记(旧版把 (一)/8. 挖掉的根因);
+   句子太短不挖, 没有合适目标就不生成 —— 宁可少而不能烂 */
+function kpClozeTarget(pt){
+  const body=String(pt||"").trim().replace(_KP_HEAD_STRIP,"");
+  if(body.length<12) return null;
+  const cands=[]; let m;
+  const reF=/\$([^$\n]{1,200})\$/g;
+  while((m=reF.exec(body))){
+    if(m[1].length>40) continue;               // 公式太长, 整式填空没有记忆价值
+    cands.push({t:m[1],full:m[0],w:2});
+  }
+  if(!cands.length){
+    const plain=body.replace(/\$[^$]*\$/g,"  ");   // 公式段整段抹掉: 公式内部的下标/系数数字绝不能被挖
+    const reN=/(?<![\w\\])\d+(?:\.\d+)?%?/g;
+    while((m=reN.exec(plain))){
+      if(m.index<4) continue;                  // 开头数字多为序号/年份语境, 跳过
+      if(/^(19|20)\d{2}$/.test(m[0])&&m.index<12) continue;
+      if(m[0].length<2) continue;              // 个位数字(=0/=1/序号)信息量太低, 不挖
+      cands.push({t:m[0],full:m[0],w:1});
+      if(cands.length>=3) break;
+    }
+  }
+  if(!cands.length) return null;
+  cands.sort((a,b)=>b.w-a.w||b.t.length-a.t.length);
+  const c=cands[0];
+  const front=body.replace(c.full,"▢▢▢");
+  if(front===body||/^\s*▢/.test(front)||front.length<8) return null;   // 无上下文线索的残片不出卡
+  return {front,back:c.t};
 }
 function allCards(){
   const isNum=t=>/^\d+(\.\d+)*$/.test(String(t||"").trim());
@@ -1120,15 +1185,15 @@ function allCards(){
     const ct=(kp.content||"").trim();
     if(!ct||isNum(kp.title)) continue;          // 空壳/纯编号骨架节点不入卡池
     if(kp.sourceBook==="C"){
-      // 按编号小点拆卡: 每个要点一张知识卡, 首要点沿用 kc:<id> 保证与知识树「生成复习卡」联动
+      // 按编号小点拆卡(支持行内连排编号); 正面=「标题 · 小点引导语」, 首点沿用 kc:<id> 保持与知识树联动
       const pts=splitKpPoints(ct);
       pts.forEach((pt,i)=>{
         const id=i===0?"kc:"+kp.id:("kc:"+kp.id+"#"+i);
-        cCards.push({id,type:"kp",front:pts.length>1?`${kp.title} (${i+1}/${pts.length})`:kp.title,back:pt,kpId:kp.id,ch:kp.chapterId});
-        const sents=pt.split(/[。;；]/).filter(s=>/\$[^$]+\$|\d/.test(s)&&s.length>6).slice(0,1);
-        sents.forEach((s,j)=>{ const m=s.match(/\$([^$]+)\$|(\d+\.?\d*)/); if(!m) return;
-          const blank=m[1]||m[2];
-          cCards.push({id:`cl:${kp.id}:${i}:${j}`,type:"cloze",front:s.replace(blank,"▢▢▢"),back:blank,kpId:kp.id,ch:kp.chapterId}); });
+        const lead=kpPointLead(pt);
+        const front=(pts.length>1&&lead&&lead!==kp.title)?`${kp.title} · ${lead}`:(pts.length>1?`${kp.title} (${i+1}/${pts.length})`:kp.title);
+        cCards.push({id,type:"kp",front,back:pt,kpId:kp.id,ch:kp.chapterId});
+        const cz=kpClozeTarget(pt);
+        if(cz) cCards.push({id:`cl:${kp.id}:${i}`,type:"cloze",front:cz.front,back:cz.back,kpId:kp.id,ch:kp.chapterId});
       });
     }else{
       // B 书仅有考点提纲; 该章已被 C 具体知识点覆盖时跳过, 避免提纲卡刷屏
@@ -1206,6 +1271,7 @@ Cards.browse=function(){
       <div class="muted" style="font-size:11px;white-space:nowrap;margin-left:8px">${esc(chapPath(c.ch))}</div></div>
     <div class="card-back" style="display:none;padding:6px 12px 8px;white-space:pre-wrap;line-height:1.6;color:var(--tx2)">${esc(c.back||"")}</div>`).join("");
   box.innerHTML=rows||'<span class="muted">没有匹配的卡片</span>';
+  renderMath(box);
   const cnt=$("#cards-cnt"); if(cnt) cnt.textContent="共 "+cards.length+" 张";
 };
 Cards.showCard=function(row){ const back=row.nextElementSibling; if(back&&back.classList.contains("card-back")) back.style.display=back.style.display==="none"?"block":"none"; };
@@ -1595,7 +1661,8 @@ function vWrong(){
     <div class="row" style="align-items:center;flex-wrap:wrap">
       <select id="wrong-subj" onchange="Wrong.render()"><option value="">全部科目</option>${Plan.syllabus().map(s=>`<option value="${s.id}">${esc(s.title)}</option>`).join("")}</select>
       <span class="muted" id="wrong-cnt"></span>
-      <button class="btn sm" onclick="Wrong.rebrushAll()">重刷筛选结果</button></div>
+      <button class="btn sm" onclick="Wrong.rebrushAll()">重刷筛选结果</button>
+      <button class="btn sm bad" onclick="Wrong.clearAll()">清空筛选结果</button></div>
     <div id="wrong-list"></div></div>`;
   Wrong.render();
 }
@@ -1629,11 +1696,13 @@ const Wrong={
           </select></div></div>
         <div style="display:flex;flex-direction:column;gap:6px">
           <button class="btn sm ok" onclick="Wrong.master('${q.id}')">已掌握</button>
-          <button class="btn sm ghost" onclick="Wrong.review('${q.id}')">记忆卡</button></div></div>`; };
+          <button class="btn sm ghost" onclick="Wrong.review('${q.id}')">记忆卡</button>
+          <button class="btn sm bad" onclick="Wrong.del('${q.id}')">删除</button></div></div>`; };
     box.innerHTML=order.filter(k=>groups[k]).map(k=>{ const qs=groups[k]; const ids=qs.map(q=>q.id);
       return `<details class="wrong-group" open style="margin-bottom:8px;border:1px solid rgba(128,128,128,.18);border-radius:8px;padding:4px 8px">
         <summary style="cursor:pointer;list-style:none;font-weight:600"><span style="font-size:13px">${esc(k)}</span> <span class="muted" style="font-weight:400;font-size:11px">(${qs.length})</span>
-          <button class="btn sm ghost" style="margin-left:8px" onclick="event.stopPropagation();Wrong.rebrush(${JSON.stringify(ids)})">重刷本组</button></summary>
+          <button class="btn sm ghost" style="margin-left:8px" onclick="event.stopPropagation();Wrong.rebrush(${JSON.stringify(ids)})">重刷本组</button>
+          <button class="btn sm bad" style="margin-left:6px" onclick="event.stopPropagation();Wrong.delGroup(${JSON.stringify(ids)})">清空本组</button></summary>
         <div>${qs.map(qrow).join("")}</div></details>`; }).join("");
   },
   rebrush(ids){
@@ -1641,7 +1710,17 @@ const Wrong={
     Brush.f={book:"",ch:"",mode:"seq",scope:"all",n:99999}; Brush.queue=ids.slice(); Brush.pos=0; Brush.showA=false; Brush.clearAuto();
     location.hash="#brush"; setTimeout(()=>drawQ(),80); toast("已载入 "+ids.length+" 道错题到刷题");
   },
-  rebrushAll(){ const sid=(($("#wrong-subj")||{}).value)||""; this.rebrush(this._filtered(sid).map(q=>q.id)); }
+  rebrushAll(){ const sid=(($("#wrong-subj")||{}).value)||""; this.rebrush(this._filtered(sid).map(q=>q.id)); },
+  /* 删除错题记录: 仅清 w 移出错题本, 保留做题次数/正确率(联动统计不受影响) */
+  _drop(ids,label){
+    ids=(ids||[]).filter(Boolean); if(!ids.length){ toast("没有可删除的记录"); return; }
+    if(!confirm("把 "+ids.length+" 道题移出错题本?\n(仅清除错误记录, 做题次数与正确率保留)")) return;
+    ids.forEach(id=>{ const p=ST.progress[id]; if(p) p.w=0; });
+    Store.save("progress"); this.render(); toast("已移出 "+ids.length+" 道错题");
+  },
+  del(id){ this._drop([id]); },
+  delGroup(ids){ this._drop(ids); },
+  clearAll(){ const sid=(($("#wrong-subj")||{}).value)||""; this._drop(this._filtered(sid).map(q=>q.id)); }
 };
 
 /* ================= 学习计划 ================= */
@@ -1896,15 +1975,20 @@ async function aiChat(prompt,opts){
   if(!/^https?:\/\//i.test(u)) u="https://"+u;               // 漏写协议时按 https 处理
   u=u.replace(/\/+$/,"");
   if(!/\/chat\/completions$/.test(u)) u+="/chat/completions"; // 已填完整端点则不重复拼接
+  /* 混合内容预检: HTTPS 页面请求 HTTP 接口必然被浏览器拦截, 提前给出可行动的提示而非笼统的 Failed to fetch */
+  if(typeof location!=="undefined"&&location.protocol==="https:"&&/^http:\/\//i.test(u))
+    throw new Error("当前是 HTTPS 页面, 浏览器会拦截对 HTTP 接口的请求(混合内容限制) — 这就是\"Failed to fetch\"的原因。解决办法二选一: ① 改用 HTTPS 云接口(如 https://api.deepseek.com/v1); ② 把 index.standalone.html 下载到本地双击打开, 再填本地模型地址。");
   const ctrl=(typeof AbortController!=="undefined")?new AbortController():null;
   const tmo=opts.timeout||300000;
   const tm=setTimeout(()=>{ if(ctrl) ctrl.abort(); },tmo);
   try{
     let r;
     try{
+      const body={model:cfg.model||"deepseek-chat",messages:[{role:"user",content:prompt}],
+        temperature:opts.temperature==null?0.3:opts.temperature};
+      if(opts.max_tokens) body.max_tokens=opts.max_tokens;
       r=await fetch(u,{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+cfg.key},
-        body:JSON.stringify({model:cfg.model||"deepseek-chat",messages:[{role:"user",content:prompt}],
-          temperature:opts.temperature==null?0.3:opts.temperature}),
+        body:JSON.stringify(body),
         signal:ctrl?ctrl.signal:undefined});
     }catch(ne){
       const msg=String((ne&&ne.message)||ne);
@@ -3025,8 +3109,9 @@ function vSet(){
       <input id="set-aiurl" placeholder="OpenAI 兼容接口, 如 https://api.deepseek.com/v1" value="${esc((ST.settings.ai||{}).url||"")}" style="flex:2;min-width:260px">
       <input id="set-aikey" placeholder="API Key" value="${esc((ST.settings.ai||{}).key||"")}" style="flex:1;min-width:150px">
       <input id="set-aimodel" placeholder="模型名, 如 deepseek-chat" value="${esc((ST.settings.ai||{}).model||"")}" style="width:150px">
-      <button class="btn sm" onclick="Settings.save()">保存</button></div>
-    <div class="muted" style="margin-top:8px">支持任何 OpenAI 兼容接口 (DeepSeek / 硅基流动 / Kimi 等); Key 仅保存在本地浏览器, 不随同步上传。若提示跨域(CORS)失败, 请换支持浏览器直连的服务商。</div></div>
+      <button class="btn sm" onclick="Settings.save()">保存</button>
+      <button class="btn sm ghost" onclick="Settings.testAI()">测试连接</button></div>
+    <div class="muted" style="margin-top:8px">支持任何 OpenAI 兼容接口 (DeepSeek / 硅基流动 / Kimi 等); Key 仅保存在本地浏览器, 不随同步上传。若提示跨域(CORS)失败, 请换支持浏览器直连的服务商; HTTPS 页面填 http:// 地址会被浏览器拦截(混合内容)。</div></div>
   <div class="card"><h2 style="font-size:14px">数据管理</h2><div class="row" style="margin-top:8px;flex-wrap:wrap">
     <button class="btn sm ghost" onclick="Settings.exportAll(0)">导出进度 (JSON)</button>
     <button class="btn sm ghost" onclick="Settings.exportAll(1)">导出完整备份（进度 + 导入题库）</button>
@@ -3045,6 +3130,18 @@ const SUPABASE_SCHEMA_SQL=`create table if not exists beikao_state (
 alter table beikao_state enable row level security;
 create policy "anon_beikao_rw" on beikao_state for all to anon using (true) with check (true);`;
 const Settings={
+  /* AI 连通性自检: 保存配置后发一个最小请求, 把具体失败原因(而不是笼统报错)告诉用户 */
+  async testAI(){
+    this.save();
+    const cfg=ST.settings.ai||{};
+    if(!cfg.url||!cfg.key){ toast("请先填写接口地址与密钥"); return; }
+    toast("测试连接中…");
+    try{
+      const j=await aiChat("连接测试,只回复两个字母: ok",{temperature:0,timeout:30000,max_tokens:8});
+      const t=aiTxt(j);
+      toast("✅ 连接成功"+(t?(" · 模型回复: "+t.slice(0,40)):""));
+    }catch(e){ toast("❌ "+String(e.message||e).slice(0,150)); }
+  },
   backupHint(){
     const lb=ST.settings.lastBackup;
     const imps=Imports.all().length;
@@ -3224,7 +3321,15 @@ const Fish={
 /* ================= 资料库 (教材页码进度 + 带页码摘录 + 源文件自检) ================= */
 // 页图目录映射(与 pipeline.PAGE_DIRS 对齐)
 const LIB_PAGE_DIR = {A:"data/raw_pages", B:"data/raw_pages_B", C:"data/raw_pages_C"};
-function libPageSrc(tag, page){ const p=(LIB_PAGE_DIR[String(tag).toUpperCase()]||"data/raw_pages")+"/page_"+page+".png"; return pageImgSrc(p); }
+/* 页码偏移: 源 PDF 前几页是封面/目录/前言, 提取页图时被跳过(见 config/page_offset.json),
+   图库存的是 PDF 页码; 资料库展示的是教材页码, 取图前必须加上偏移, 否则前几页 404 */
+const LIB_PAGE_OFFSET = {A:3, B:7, C:9};
+function libPageSrc(tag, page){
+  const t=String(tag).toUpperCase();
+  const off=LIB_PAGE_OFFSET[t]||0;
+  const p=(LIB_PAGE_DIR[t]||"data/raw_pages")+"/page_"+((+page||1)+off)+".png";
+  return pageImgSrc(p);
+}
 const Lib = {
   book:null, page:1, total:0, timer:null, _bu:null, _vis:null,
   readCount(tag){ const r=ST.lib.read[tag]||{}; return Object.keys(r).filter(k=>r[k]).length; },
@@ -3265,7 +3370,7 @@ const Lib = {
   renderPage(){
     const imgBox=$("#lib-page-img"); if(!imgBox) return;
     const src=libPageSrc(this.book,this.page);
-    imgBox.innerHTML=`<img class="media-img" src="${src}" onerror="this.outerHTML='<div class=&quot;muted&quot;>本页图像未加载(本地源 PDF 页图缺失或部署环境无数据) — 页码 ${this.page}</div>'">`;
+    imgBox.innerHTML=`<img class="media-img" src="${src}" onerror="Lib.pageFail(this)">`;
     const rd=ST.lib.read[this.book]||{}; let changed=false;
     if(!rd[this.page]){ rd[this.page]=true; ST.lib.read[this.book]=rd; changed=true; }
     const tag=document.querySelector?$("#lib-reader .tag"):null;
@@ -3377,6 +3482,15 @@ function vLib(){
     document.addEventListener("visibilitychange",Lib._vis); }
 }
 
+/* 页图加载失败: 明确提示 + 一键清缓存强刷(线上多为旧缓存; 加页码偏移后真缺页已极少) */
+Lib.pageFail=function(el){
+  const d=document.createElement("div"); d.className="muted";
+  d.style.cssText="margin:14px auto;font-size:12.5px;border:1px dashed rgba(128,128,128,.4);border-radius:8px;padding:12px;max-width:480px;text-align:center";
+  d.innerHTML="本页图像未加载 — 页码 "+(Lib.page||"?")+
+    (_LOCAL?"（本地源 PDF 页图缺失）":"（多为浏览器缓存旧数据所致, 点下方按钮修复）")+
+    '<br><button class="btn sm ghost" style="margin-top:8px" onclick="Brush.purgeCache()">🔄 清除缓存并强制刷新</button>';
+  el.replaceWith(d);
+};
 /* ---- 视频资料库 (P7: 分类下拉改为考纲科目 —— 各文件资料内章节保留在标题里, 统计/计划一律按科目归属) ---- */
 Lib.vidSubjOptions=function(cur){
   return '<option value="">未分类</option>'+Plan.syllabus().map(s=>`<option value="${s.id}" ${cur===s.id?"selected":""}>${esc(s.title)}</option>`).join("");
