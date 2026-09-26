@@ -198,9 +198,9 @@ function bookOfCh(cid){ if(!cid) return null;
 const ST = {progress:{}, srs:{}, settings:{examDate:"",examName:"注册环保工程师·基础考试",dailyNew:20,dailyBrush:50,
   weekdayMin:90,weekendMin:240,subjects:{},theme:"light",srsMode:"sm2",targetAcc:70,targetScore:132,subjMigrated:false,learnRatio:{base:60,mid:40,sprint:15},
   supabaseUrl:"",supabaseKey:""}, plan:{}, exams:[], examTemplates:[], holidays:[], syllabus:[], taskDays:{}, holidayCache:{},
-  overrides:{}, daily:{}, lib:{read:{},time:{},excerpts:[]}};
+  overrides:{}, daily:{}, lib:{read:{},time:{},excerpts:[]}, treeMerges:{}, videos:[]};
 const SKEYS=["progress","srs","settings","plan","exams","overrides","daily","lib","videos","aiPlan",
-  "examTemplates","holidays","syllabus","taskDays","holidayCache"];
+  "examTemplates","holidays","syllabus","taskDays","holidayCache","treeMerges"];
 const ST_DEF=JSON.parse(JSON.stringify(ST));   // 出厂默认值快照, 供「全量覆盖导入」复位
 let _mem={};
 const Store={
@@ -258,7 +258,7 @@ const Sync={
   pull(cloud){ const c=cloud||{};
     if(c.settings) ST.settings=Object.assign({},c.settings,
       {supabaseUrl:ST.settings.supabaseUrl,supabaseKey:ST.settings.supabaseKey,ai:ST.settings.ai||c.settings.ai});
-    for(const k of ["progress","srs","overrides","daily","plan","aiPlan","taskDays"]) if(c[k]!==undefined) ST[k]=Sync._mergeObj(ST[k]||{},c[k]);
+    for(const k of ["progress","srs","overrides","daily","plan","aiPlan","taskDays","treeMerges"]) if(c[k]!==undefined) ST[k]=Sync._mergeObj(ST[k]||{},c[k]);
     if(c.exams) ST.exams=Sync._mergeArr(ST.exams||[],c.exams);
     if(c.videos) ST.videos=Sync._mergeArr(ST.videos||[],c.videos);
     if(c.examTemplates) ST.examTemplates=Sync._mergeArr(ST.examTemplates||[],c.examTemplates);
@@ -1238,10 +1238,15 @@ function kpMastery(kpId){
 }
 function vTree(){
   const el=$("#main");
-  el.innerHTML=`<h2>知识树</h2>
-  <div class="card"><div class="row"><input id="tree-q" placeholder="搜索知识点/章节..." style="flex:1" oninput="Tree.draw()">
-    <span class="muted">点击节点查看内容, 可一键生成复习卡</span></div>
-  <div id="tree-box" style="margin-top:10px;max-height:60vh;overflow:auto"></div></div>
+  el.innerHTML=`<h2>知识树 <span class="muted" style="font-size:12px">(以考纲科目为纲 · 多资料汇总去重 · 自动分级)</span></h2>
+  <div class="card"><div class="row" style="flex-wrap:wrap">
+    <input id="tree-q" placeholder="搜索知识点..." style="flex:1;min-width:160px" oninput="Tree.draw()">
+    <select id="tree-subj" onchange="Tree.draw()"><option value="">全部科目</option>
+      ${Plan.syllabus().map(s=>`<option value="${s.id}">${esc(s.title)}</option>`).join("")}</select>
+    <button class="btn sm ghost" id="tree-mind-btn" onclick="Tree.mindToggle()">🌳 思维导图</button>
+    <button class="btn sm ghost" onclick="Tree.aiMerge()">🤖 AI 归并重复</button></div>
+  <div class="muted" style="font-size:11px;margin-top:5px">知识树只收录知识点(纯知识点资料 / 知识点+例题教材), 题目不进入知识树; 不同资料的同名知识点自动归并(标 ×N 源)。点 ▸ 折叠/展开, 点节点名查看内容并可一键生成复习卡。</div>
+  <div id="tree-box" style="margin-top:10px;max-height:62vh;overflow:auto"></div></div>
   <div id="tree-detail"></div>`;
   Tree.draw();
 }
@@ -1329,56 +1334,174 @@ const Tree={
       }
     }
   },
+  /* ---- P7: 标题归一键 —— 去掉「第X章/编号/括注/空白标点」后比对, 跨资料同名知识点自动归并 ---- */
+  _normKey(t){
+    return String(t||"").toLowerCase()
+      .replace(/^第\s*[0-9一二三四五六七八九十百]+\s*[章节篇][\s、.．:·]*/,"")
+      .replace(/^(\d+(?:\.\d+)*|[一二三四五六七八九十百]+)\s*[、.．:]\s*/,"")
+      .replace(/[（(][^）)]*[)）]/g,"")
+      .replace(/[\s、，,·.．:：—\-_'"]/g,"").trim();
+  },
+  /* 科目 -> 该科目全部知识点 id (跨 a/b/c 多份资料) */
+  _subjectKps(sj){
+    const chs=(sj.chapters||[]).map(c=>Plan.topCh(c));
+    const out=[];
+    for(const k of BANK.knowledgePoints||[]){
+      if(!IDX.kp[k.id]) continue;
+      if(chs.includes(Plan.topCh(k.chapterId||""))) out.push(k.id);
+    }
+    return out;
+  },
+  /* 科目 -> 归并后的层级树 [{id,kids:[...],src}] (同层同名归并, 内容取更全者) */
+  _buildSubjTree(sj){
+    const ids=this._subjectKps(sj);
+    const inSubj=new Set(ids);
+    const merges=(ST.treeMerges||{})[sj.id]||{};
+    const keyOf=id=>{ const k=this._normKey((IDX.kp[id]||{}).title||id); return merges[k]||k; };
+    const childrenOf=id=>[...new Set([...(IDX.kpKids[id]||[]),...((this._numKids&&this._numKids[id])||[])])]
+      .filter(x=>inSubj.has(x)&&x!==id);
+    const childSet=new Set(); ids.forEach(id=>childrenOf(id).forEach(c=>childSet.add(c)));
+    const mergeSibs=list=>{
+      const byKey={},out=[];
+      for(const nd of list){
+        const k=keyOf(nd.id);
+        if(!byKey[k]){ byKey[k]=nd; out.push(nd); }
+        else{ const t=byKey[k]; t.src=(t.src||1)+1;
+          const a=IDX.kp[t.id]||{}, b=IDX.kp[nd.id]||{};
+          if((b.content||"").length>(a.content||"").length) t.id=nd.id;
+          t.kids=mergeSibs(t.kids.concat(nd.kids)); }
+      }
+      return out.sort((x,y)=>this.kpCmp((IDX.kp[x.id]||{}).title,(IDX.kp[y.id]||{}).title));
+    };
+    const build=(id,depth)=>{
+      const kids=depth>10?[]:childrenOf(id).map(c=>build(c,depth+1));
+      return {id,kids,src:1};
+    };
+    return mergeSibs(ids.filter(id=>!childSet.has(id)).map(id=>build(id,0)));
+  },
   draw(){
     const kw=($("#tree-q").value||"").toLowerCase();
+    const sid=($("#tree-subj")||{}).value||"";
     this._calcNumTree();
-    const html=Object.entries(IDX.ch).map(([cid,c])=>{
-      const kidIds=this.chapterKids(cid);
-      const kids=kidIds.map(kid=>Tree.node(kid,kw)).join("");
-      const qn=allQ().filter(q=>q.chapterId===cid||q.chapterId.startsWith(cid+"-")).length;
-      const kn=Object.values(IDX.kp).filter(k=>k.chapterId===cid).length;
-      const match=!kw||c.title.toLowerCase().includes(kw);
-      if(kw&&!match&&!kids) return "";
-      return `<div class="tree-node"><div class="lb" onclick="Tree.detail('${cid}')"><b>${esc(c.title)}</b>
-        <span class="muted" style="font-size:11px;margin-left:6px">${[qn?qn+"题":"",kn?kn+"知识点":""].filter(Boolean).join(" · ")}${(!qn&&!kn&&!kids)?" · 暂无内容":""}</span></div>
-        ${kids?'<div class="tree-kids">'+kids+"</div>":""}</div>`;
+    const list=Plan.syllabus().filter(s=>!sid||s.id===sid);
+    const html=list.map(sj=>{
+      const root=this._buildSubjTree(sj);
+      const kids=root.map(nd=>this.node(nd,kw,0)).join("");
+      if(!kids) return "";
+      return `<details class="tree-node" open><summary style="cursor:pointer;list-style:none"><b>${esc(sj.title)}</b>
+        <span class="muted" style="font-size:11px;margin-left:6px">${root.length} 个主支</span></summary>
+        <div class="tree-kids">${kids}</div></details>`;
     }).join("");
-    $("#tree-box").innerHTML=html||'<span class="muted">无匹配知识点</span>';
+    $("#tree-box").innerHTML=html||'<span class="muted">该科目暂无知识点资料 — 到「资料库」导入含知识点的教材/讲义后自动汇总到这里</span>';
+    this._mind=false;   // 列表态
+    const mb=$("#tree-mind-btn"); if(mb) mb.textContent="🌳 思维导图";
   },
-  node(kid,kw){
-    const kp=IDX.kp[kid]; if(!kp) return "";
-    const kidIds=[...new Set([...(IDX.kpKids[kid]||[]),...((this._numKids&&this._numKids[kid])||[])])]
-      .sort((x,y)=>this.kpCmp((IDX.kp[x]||{}).title,(IDX.kp[y]||{}).title));
-    const kids=kidIds.map(k=>Tree.node(k,kw)).join("");
-    const match=!kw||(kp.title||"").toLowerCase().includes(kw)||(kp.content||"").toLowerCase().includes(kw);
+  node(nd,kw,depth){
+    const kp=IDX.kp[nd.id]||{};
+    const title=kp.title||nd.id;
+    const match=!kw||(title||"").toLowerCase().includes(kw)||(kp.content||"").toLowerCase().includes(kw);
+    const kids=nd.kids.map(k=>this.node(k,kw,depth+1)).join("");
     if(kw&&!match&&!kids) return "";
-    const m=kpMastery(kid); const pct=m===null?0:Math.round(m*100);
-    return `<div class="tree-node">
-      <div class="lb" onclick="Tree.detail('${kid.replace(/"/g,"")}')">
-        <span>${kids?"▾":"·"}</span><span class="grow">${esc(kp.title||kp.sec||kid)}</span>
-        <span class="prog-mini bar"><i style="width:${pct}%;background:${pct>70?"var(--ok)":pct>30?"var(--warn)":"var(--bad)"}"></i></span>
-        <span class="muted" style="width:34px;text-align:right">${m===null?"-":pct+"%"}</span></div>
-      ${kids?`<div class="tree-kids">${kids}</div>`:""}</div>`;
+    const m=kpMastery(nd.id); const pct=m===null?0:Math.round(m*100);
+    const bar=`<span class="prog-mini bar"><i style="width:${pct}%;background:${pct>70?"var(--ok)":pct>30?"var(--warn)":"var(--bad)"}"></i></span>
+      <span class="muted" style="width:34px;text-align:right">${m===null?"-":pct+"%"}</span>`;
+    const srcTag=nd.src>1?`<span class="tag" style="font-size:10px" title="多份资料同名知识点已归并">×${nd.src} 源</span>`:"";
+    if(!nd.kids.length)
+      return `<div class="tree-node"><div class="lb" onclick="Tree.detail('${nd.id.replace(/"/g,"")}')"><span style="color:var(--tx2)">·</span><span class="grow">${esc(title)}</span>${srcTag}${bar}</div></div>`;
+    return `<details class="tree-node" ${depth<1||kw?"open":""}><summary style="cursor:pointer;list-style:none">
+        <span class="grow" onclick="event.preventDefault();Tree.detail('${nd.id.replace(/"/g,"")}')">${esc(title)}</span>${srcTag}${bar}</summary>
+      <div class="tree-kids">${kids}</div></details>`;
   },
   detail(id){
-    const kp=IDX.kp[id]; const box=$("#tree-detail");
-    if(kp){
-      const qs=allQ().filter(q=>(q.knowledgePointIds||[]).includes(id));
-      box.innerHTML=`<div class="card"><h2 style="font-size:15px">${esc(kp.title||id)}</h2>
-        <div class="kp-content" style="line-height:1.85;margin:10px 0">${kpContentHTML(kp)}</div>
-        ${kp.media&&kp.media.length?`<div style="margin:8px 0">${kp.media.map(m=>`<img class="media-img" src="${mediaSrc(m)}" alt="配图" style="max-width:100%;border-radius:6px;margin:4px 0" onerror="this.style.display='none'">`).join("")}</div>`:""}
-        ${(kp.tags||[]).length?`<div class="row" style="flex-wrap:wrap;gap:6px;margin-top:4px">${kp.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</div>`:""}
-        ${kp.sourcePage?`<div class="muted" style="margin-top:6px;font-size:12px">出处: ${esc(kp.sourceBook||"")} p${esc(kp.sourcePage)}</div>`:""}
-        <div class="row" style="margin-top:10px"><button class="btn sm" onclick="Tree.review('${id.replace(/"/g,"")}')">生成今日复习卡</button>
-        <button class="btn sm ghost" onclick="location.hash='#brush'">刷本章题</button></div>
-        ${qs.length?`<div class="muted" style="margin-top:8px">关联题目 ${qs.length} 道</div>`:""}</div>`;
-    } else {
-      const ch=IDX.ch[id];
-      box.innerHTML=`<div class="card"><h2 style="font-size:15px">${esc(ch.title)}</h2>
-        <div class="muted" style="margin-top:6px">小节: ${(ch.children||[]).map(s=>esc(s.title)).join(" · ")||"-"}</div>
-        <div class="row" style="margin-top:10px"><button class="btn sm" onclick="Tree.brushCh('${id}')">刷本章全部题</button></div></div>`;
-    }
+    const kp=IDX.kp[id]; const box=$("#tree-detail"); if(!kp){ return; }
+    box.innerHTML=`<div class="card"><h2 style="font-size:15px">${esc(kp.title||id)}</h2>
+      <div class="kp-content" style="line-height:1.85;margin:10px 0">${kpContentHTML(kp)}</div>
+      ${kp.media&&kp.media.length?`<div style="margin:8px 0">${kp.media.map(m=>`<img class="media-img" src="${mediaSrc(m)}" alt="配图" style="max-width:100%;border-radius:6px;margin:4px 0" onerror="this.style.display='none'">`).join("")}</div>`:""}
+      ${(kp.tags||[]).length?`<div class="row" style="flex-wrap:wrap;gap:6px;margin-top:4px">${kp.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</div>`:""}
+      ${kp.sourcePage?`<div class="muted" style="margin-top:6px;font-size:12px">出处: ${esc(kp.sourceBook||"")} p${esc(kp.sourcePage)}</div>`:""}
+      <div class="row" style="margin-top:10px"><button class="btn sm" onclick="Tree.review('${id.replace(/"/g,"")}')">生成今日复习卡</button></div></div>`;
     renderMath(box); box.scrollIntoView({behavior:"smooth"});
+  },
+  /* ---- P7: 思维导图(SVG 树状图, 按当前科目; 层级截到 3 层, 更深并入叶子) ---- */
+  mindToggle(){ this._mind=!this._mind;
+    const b=$("#tree-mind-btn"); if(b) b.textContent=this._mind?"📋 返回列表":"🌳 思维导图";
+    this._mind?this.mind():this.draw(); },
+  mind(){
+    const sid=($("#tree-subj")||{}).value||"";
+    this._calcNumTree();
+    const H=24,GAP=7,W=150,DW=175;
+    let y=10; const nodes=[],links=[]; let maxd=0,count=0;
+    const trunc=t=>{ t=String(t||""); return t.length>15?t.slice(0,14)+"…":t; };
+    const place=(nd,d)=>{
+      count++; maxd=Math.max(maxd,d);
+      const t=trunc((IDX.kp[nd.id]||{}).title||nd.id);
+      if(!nd.kids.length||d>=3){
+        const my=y; nodes.push({x:d*DW,y:my,t,leaf:1,d}); y+=H+GAP;
+        return {top:my,ctr:my+H/2};
+      }
+      const cs=nd.kids.map(k=>place(k,d+1));
+      const ctr=(cs[0].ctr+cs[cs.length-1].ctr)/2;
+      nodes.push({x:d*DW,y:ctr-H/2,t,d});
+      cs.forEach(c=>links.push({x1:d*DW+W,y1:ctr,x2:(d+1)*DW,y2:c.ctr}));
+      return {top:cs[0].top,ctr};
+    };
+    const roots=Plan.syllabus().filter(s=>!sid||s.id===sid);
+    for(const sj of roots){
+      const root=this._buildSubjTree(sj);
+      if(!root.length) continue;
+      const sy=y; y+=H+GAP;
+      const cs=root.map(k=>place(k,1));
+      const ctr=(cs[0].ctr+cs[cs.length-1].ctr)/2;
+      nodes.push({x:0,y:sy,t:trunc(sj.title),root:1,d:0});
+      cs.forEach(c=>links.push({x1:W,y1:sy+H/2,x2:DW,y2:c.ctr}));
+    }
+    if(!nodes.length||count>500){ $("#tree-box").innerHTML=count>500?'<span class="muted">节点过多, 请先在右侧选择单一科目再生成导图</span>':'<span class="muted">暂无知识点可生成导图</span>'; return; }
+    const COL=["var(--pri)","#8e44ad","#d68910","#27ae60"];
+    const svg=`<svg width="${(maxd+1)*DW+20}" height="${y+10}" style="min-width:100%">`
+      +links.map(l=>`<path d="M${l.x1} ${l.y1} C ${l.x1+40} ${l.y1}, ${l.x2-40} ${l.y2}, ${l.x2} ${l.y2}" fill="none" stroke="rgba(128,128,128,.45)" stroke-width="1.2"/>`).join("")
+      +nodes.map(n=>`<g><rect x="${n.x}" y="${n.y}" width="${W}" height="${H}" rx="6" fill="${n.root?COL[0]:COL[Math.min(n.d,3)]}" opacity="${n.leaf?0.75:0.95}"/><text x="${n.x+8}" y="${n.y+16}" font-size="11" fill="#fff">${esc(n.t)}</text></g>`).join("")
+      +"</svg>";
+    $("#tree-box").innerHTML=`<div style="overflow:auto">${svg}</div>`;
+  },
+  /* ---- P7: AI 辅助归并 —— 把同科目内疑似重复的知识点标题交给 AI 判断, 结果持久化到 ST.treeMerges ---- */
+  async aiMerge(){
+    const cfg=ST.settings.ai||{};
+    if(!cfg.url||!cfg.key){ toast("请先到 设置 → AI 接口 填写接口地址与密钥"); return; }
+    const sid=($("#tree-subj")||{}).value||"";
+    this._calcNumTree();
+    const cands=[];
+    for(const sj of Plan.syllabus().filter(s=>!sid||s.id===sid)){
+      const kps=this._subjectKps(sj).map(id=>({sjId:sj.id,t:(IDX.kp[id]||{}).title||""}));
+      for(let i=0;i<kps.length;i++) for(let j=i+1;j<kps.length;j++){
+        const a=kps[i].t,b=kps[j].t; if(!a||!b) continue;
+        const na=this._normKey(a),nb=this._normKey(b);
+        if(na===nb||na.length<6||nb.length<6) continue;
+        if(na.indexOf(nb)===0||nb.indexOf(na)===0) cands.push({sjId:sj.id,a,b});
+        if(cands.length>=60) break;
+      }
+      if(cands.length>=60) break;
+    }
+    if(!cands.length){ toast("未发现疑似重复的知识点"); return; }
+    const box=$("#tree-box"); if(box) box.innerHTML='<div class="muted">🤖 AI 正在判断 '+cands.length+' 组疑似重复知识点…</div>';
+    try{
+      const prompt=`以下是同一科目内疑似重复的知识点标题对(编号|标题A|标题B)。判断哪些对指的是同一个知识点(允许表述略有差异; 明显不同主题的不要选)。
+${cands.map((c,i)=>`${i+1}|${c.a}|${c.b}`).join("\n")}
+只输出 JSON: {"dup":[1,3,...]} (dup 里只填确实是同一知识点的编号; 一个都没有则 {"dup":[]})`;
+      const r=await fetch(cfg.url.replace(/\/+$/,"")+"/chat/completions",{method:"POST",
+        headers:{"Content-Type":"application/json",Authorization:"Bearer "+cfg.key},
+        body:JSON.stringify({model:cfg.model||"deepseek-chat",messages:[{role:"user",content:prompt}],temperature:0})});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      const j=await r.json();
+      const m2=(j.choices[0].message.content||"").match(/\{[\s\S]*\}/);
+      const dup=m2?(JSON.parse(m2[0]).dup||[]):[];
+      let n=0; ST.treeMerges=ST.treeMerges||{};
+      dup.forEach(x=>{ const c=cands[+x-1]; if(!c) return;
+        const mm=ST.treeMerges[c.sjId]=ST.treeMerges[c.sjId]||{};
+        const ka=this._normKey(c.a),kb=this._normKey(c.b);
+        if(ka&&kb&&ka!==kb){ mm[kb]=ka; n++; } });
+      Store.save("treeMerges"); this.draw();
+      toast(n?("AI 已归并 "+n+" 组重复知识点"):"AI 判断没有需要归并的重复");
+    }catch(e){ this.draw(); toast("AI 归并失败: "+String(e.message||e)); }
   },
   brushCh(cid){ Brush.f.ch=cid; Brush.f.book=""; Brush.f.scope="all"; Brush.f.mode="seq"; location.hash="#brush"; setTimeout(()=>Brush.start(),60); },
   review(kid){
@@ -1581,7 +1704,7 @@ function vPlan(){
     </div>
   </div>
 
-  <div class="card"><h2 style="font-size:14px">③ 科目与范围 <span class="muted" style="font-size:11px">(考纲17科 · 类别/状态/考纲题量可手改, 放弃的科目退出计划与今日任务)</span></h2>
+  <details class="card"><summary style="cursor:pointer;list-style:none"><h2 style="font-size:14px;display:inline">③ 科目与范围 <span class="muted" style="font-size:11px">(考纲17科 · 类别/状态/考纲题量可手改, 放弃的科目退出计划与今日任务 · 点击展开)</span></h2></summary>
     <div class="row" style="margin-top:6px;flex-wrap:wrap;align-items:center">
       <button class="btn sm" onclick="Plan.addSubj()">＋ 添加科目</button>
       <button class="btn sm ghost" onclick="Plan.toggleSyllabusImport()">导入考纲…</button>
@@ -1599,9 +1722,9 @@ function vPlan(){
       <tbody id="plan-subj-body">${Plan._subjRows()}</tbody>
     </table></div>
     <div class="muted" style="margin-top:6px">类别路由: 理解型→工作日主攻, 记忆型→周末背诵, 综合型→工作日原理+周末综合; 权重越高, 排程题量越多; 表格可左右滑动查看全部列。</div>
-  </div>
+  </details>
 
-  <div class="card"><h2 style="font-size:14px">⑧ 假期与碎片 <span class="muted" style="font-size:11px">(假期自动降强度 · 碎片时间速刷)</span></h2>
+  <details class="card"><summary style="cursor:pointer;list-style:none"><h2 style="font-size:14px;display:inline">⑧ 假期与碎片 <span class="muted" style="font-size:11px">(假期自动降强度 · 碎片时间速刷 · 点击展开)</span></h2></summary>
     <div id="plan-holidays"></div>
     <div class="row" style="margin-top:8px;flex-wrap:wrap;align-items:center">
       <label>假期起</label><input type="date" id="hd-start" style="width:140px">
@@ -1612,17 +1735,17 @@ function vPlan(){
       <button class="btn sm ghost" onclick="Quick.fragment()">⚡ 碎片速刷(5题)</button>
     </div>
     <div class="muted" style="margin-top:6px">假期内的「今日任务」会按强度系数缩减额度；碎片速刷用于等车/排队等零碎时间, 随机抽 5 题保持手感。</div>
-  </div>
+  </details>
 
   <div class="card"><h2 style="font-size:14px">今日任务</h2><div id="plan-today"></div></div>
 
-  <div class="card"><h2 style="font-size:14px">计划结构 <span class="muted" style="font-size:11px">(阶段 → 月 → 周 → 天, 点开逐层看; 生成计划后自动更新)</span></h2>
-    <div id="hiera-out"></div></div>
+  <details class="card"><summary style="cursor:pointer;list-style:none"><h2 style="font-size:14px;display:inline">计划结构 <span class="muted" style="font-size:11px">(阶段 → 月 → 周 → 天, 生成计划后自动更新 · 点击展开)</span></h2></summary>
+    <div id="hiera-out" style="margin-top:8px"></div></details>
 
-  <div class="card"><h2 style="font-size:14px">进度校准 <span class="muted" style="font-size:11px">(保大调小: 优先动天级任务赶月度目标, 实在不行才调整月计划)</span></h2>
-    <div id="calib-out"></div></div>
+  <details class="card"><summary style="cursor:pointer;list-style:none"><h2 style="font-size:14px;display:inline">进度校准 <span class="muted" style="font-size:11px">(保大调小: 优先动天级任务赶月度目标 · 点击展开)</span></h2></summary>
+    <div id="calib-out" style="margin-top:8px"></div></details>
 
-  <div class="card"><h2 style="font-size:14px">确定性规划 <span class="muted" style="font-size:11px">(离线可用 · 不依赖 AI · <b>当前生效</b>)</span></h2>
+  <details class="card" open><summary style="cursor:pointer;list-style:none"><h2 style="font-size:14px;display:inline">确定性规划 <span class="muted" style="font-size:11px">(离线可用 · 不依赖 AI)</span></h2></summary>
     ${(()=>{ const p=ST.plan;
       if(!p||!p.generatedAt) return '<div class="muted" style="margin-top:6px;font-size:12px">尚未生成计划。生成后这里显示生效来源与时间。</div>';
       const cs=p.courseStat||{}; const tn=Object.values(cs).reduce((a,c)=>a+(c.n||0),0);
@@ -1641,14 +1764,20 @@ function vPlan(){
       <button class="btn ghost" onclick="Plan.pomoStart()">🍅 开始专注</button>
       ${ST.plan&&ST.plan.generatedAt?`<button class="btn sm ghost" onclick="Plan.ensureTasks(true);toast('未来30天每日任务已按当前计划重算');renderPlanMini($('#plan-today'))">重算每日任务</button>`:""}</div>
     <div id="pomo-box" class="muted" style="margin-top:6px"></div>
-    <div id="det-plan-out"></div></div>
+    <div id="det-plan-out"></div></details>
 
-  <div class="card"><h2 style="font-size:14px">AI 智能规划 <span class="muted" style="font-size:11px">(需先在设置里配置 AI 接口)</span></h2>
-    <div class="row" style="margin-top:8px;flex-wrap:wrap">
-      <label>每日可学习</label><input type="number" id="ai-min" value="${Math.max(wkMin,weMin)}" style="width:70px"><label>分钟</label>
-      <button class="btn" onclick="Plan.aiGen(false)">${ST.aiPlan?"重新生成":"AI 生成学习计划"}</button>
-      ${ST.aiPlan?'<button class="btn ghost" onclick="Plan.aiGen(true)">结合进度动态调整</button>':""}</div>
-    <div id="ai-plan-out"></div></div>`;
+  <details class="card" open><summary style="cursor:pointer;list-style:none"><h2 style="font-size:14px;display:inline">AI 智能规划 <span class="muted" style="font-size:11px">(需先在设置里配置 AI 接口)</span></h2></summary>
+    <div class="row" style="margin-top:8px;flex-wrap:wrap;align-items:center">
+      <label>分配模式</label>
+      <select id="ai-mode">
+        <option value="mixed">科目混配(多科穿插, 换脑子)</option>
+        <option value="sequential">单科推进(一科过关再学下一科)</option>
+      </select>
+      <button class="btn" onclick="Plan.aiSched()">🤖 AI 分析并排程(驱动计划)</button>
+      <button class="btn ghost" onclick="Plan.aiGen(false)">${ST.aiPlan?"重新生成策略文档":"AI 策略文档(Markdown)"}</button>
+      ${ST.aiPlan?'<button class="btn sm ghost" onclick="Plan.aiGen(true)">结合进度调整文档</button>':""}</div>
+    <div class="muted" style="margin-top:6px;font-size:11.5px">「AI 分析并排程」: AI 自行分析各科知识点数量、课程剩余时长、难易度(正确率/类别/分值), 结合你放弃的科目与工作日/周末时间, 按所选模式(单科推进/混配)直接生成每月分配, 并落位到每周/每日任务 —— 计划真正由 AI 参与。</div>
+    <div id="ai-plan-out"></div></details>`;
   Plan.renderHolidays();
   renderPlanMini($("#plan-today"));
   Plan.renderHiera();
@@ -1673,21 +1802,53 @@ const Plan={save(){
 },
 /* 科目清单: 以考纲科目表为准(默认内置17科), 合并用户覆盖(类别/状态/权重); 题库章节映射其上统计进度 */
 syllabus(){ return (Array.isArray(ST.syllabus)&&ST.syllabus.length)?ST.syllabus:SYLLABUS_PRESET; },
+/* ---------- P7: 科目统一口径 ----------
+   资料(视频/知识点)各自文件内部可保留自己的章节, 但一切统计/展示/计划一律归一到考纲科目。 */
+/* 章节 id -> 考纲科目 */
+subjOfCh(cid){ const t=this.topCh(cid);
+  return this.syllabus().find(s=>(s.chapters||[]).some(c=>this.topCh(c)===t))||null; },
+/* 名称 -> 考纲科目: 兼容「第10章 X」「10 X」「10.1 X」「X」等写法, 归一后精确/最长包含匹配 */
+subjByName(name){
+  const norm=s=>String(s||"").toLowerCase()
+    .replace(/^第\s*[0-9一二三四五六七八九十百]+\s*[章节篇][\s、.．:·]*/,"")
+    .replace(/^\d+(?:\.\d+)*\s*[、.．]?\s*/,"")
+    .replace(/^[一二三四五六七八九十百]+\s*[、.．]\s*/,"")
+    .replace(/[（(][^）)]*[)）]/g,"")
+    .replace(/[\s、，,·.．:：—\-_'"]/g,"").trim();
+  const n=norm(name); if(n.length<2) return null;
+  const list=this.syllabus();
+  const hit=list.find(s=>norm(s.title)===n); if(hit) return hit;
+  let best=null,bl=0;
+  for(const s of list){ const t=norm(s.title);
+    if(t.length>=2&&(n.indexOf(t)>=0||t.indexOf(n)>=0)&&t.length>bl){ best=s; bl=t.length; } }
+  return best;
+},
+/* 科目学习负荷: 知识点数 + 课程讲数/估时 + 剩余题量 (供 AI 排程分析与展示) */
+subjLoad(id){
+  const sj=this.syllabus().find(x=>x.id===id); if(!sj) return null;
+  const chs=(sj.chapters||[]).map(c=>this.topCh(c));
+  const kps=(BANK.knowledgePoints||[]).filter(k=>chs.includes(this.topCh(k.chapterId||""))
+    &&(k.content||"").trim()&&!/^\d+(\.\d+)*$/.test(String(k.title||"").trim()));
+  const vs=(ST.videos||[]).filter(v=>v&&(v.subjectId?v.subjectId===id:(chs.length&&chs.includes(this.topCh(v.chapterId)))));
+  const estMin=vs.reduce((a,v)=>a+(v.dur>0?v.dur/60:25),0);
+  const qs=chs.length?allQ().filter(q=>chs.some(c=>q.chapterId===c||q.chapterId.startsWith(c+"-"))):[];
+  return {id,kps:kps.length,lessons:vs.length,done:vs.filter(v=>vidPct(v)>=99).length,
+    estMin:Math.round(estMin),qTotal:qs.length,qRem:qs.filter(q=>prog(q.id).a===0).length};
+},
 /* ---------- P6: 跟课学习资源映射 ---------- */
 /* 顶层章节 id: "a1-2" -> "a1" */
 topCh(c){ return String(c||"").split("-")[0]; },
-/* 科目 -> 该科目下尚未看完的视频(未看完优先, 其次按添加顺序) */
+/* 科目 -> 该科目下尚未看完的视频(未看完优先, 其次按添加顺序)。视频优先按 subjectId 归属, 旧数据回退章节映射 */
 courseOfSubj(id){
   const sj=this.syllabus().find(x=>x.id===id); if(!sj) return [];
   const chs=(sj.chapters||[]).map(c=>this.topCh(c));
-  if(!chs.length) return [];
-  const vs=(ST.videos||[]).filter(v=>v&&chs.includes(this.topCh(v.chapterId)));
+  const vs=(ST.videos||[]).filter(v=>v&&(v.subjectId?v.subjectId===id:(chs.length&&chs.includes(this.topCh(v.chapterId)))));
   return vs.filter(v=>vidPct(v)<99).sort((a,b)=>(a.ts||0)-(b.ts||0));
 },
 /* 科目 -> 该科目下已录入视频数/已看完数 */
-courseStat(id){ const vs=(()=>{ const sj=this.syllabus().find(x=>x.id===id); if(!sj) return [];
-    const chs=(sj.chapters||[]).map(c=>this.topCh(c)); if(!chs.length) return [];
-    return (ST.videos||[]).filter(v=>v&&chs.includes(this.topCh(v.chapterId))); })();
+courseStat(id){ const sj=this.syllabus().find(x=>x.id===id); if(!sj) return {n:0,done:0};
+  const chs=(sj.chapters||[]).map(c=>this.topCh(c));
+  const vs=(ST.videos||[]).filter(v=>v&&(v.subjectId?v.subjectId===id:(chs.length&&chs.includes(this.topCh(v.chapterId)))));
   return {n:vs.length,done:vs.filter(v=>vidPct(v)>=99).length}; },
 /* 阶段 -> 当日"听课占比"(0~1) */
 ratioOf(phase){ const r=(ST.settings&&ST.settings.learnRatio)||{};
@@ -1795,7 +1956,7 @@ examHint(){
 onExamChange(){ const sel=$("#plan-exam"); const ci=$("#plan-exam-custom");
   if(sel.value==="自定义"){ ci.style.display="inline-block"; ci.focus(); }
   else { ci.style.display="none"; ci.value=""; ST.settings.examName=sel.value; const h=$("#plan-exam-hint"); if(h)h.innerHTML=this.examHint(); } },
-gen(){
+gen(aiAlloc){
   const s=ST.settings; const today0=today();
   const examDate=s.examDate||"";
   const days = examDate? Math.max(0, Math.ceil((new Date(examDate)-Date.now())/864e5)) : 90;
@@ -1830,6 +1991,27 @@ gen(){
     return out;
   };
   const subj=this.subjects().filter(x=>x.mode!=="skip");
+  /* ---- P7: AI 排程分配(可选): order=主攻顺序, months[ym].focus=每月科目时间占比, mode=单科推进/混配 ---- */
+  let aiInfo=null;
+  {
+    const allIds=subj.map(x=>x.id);
+    const ord=(aiAlloc&&Array.isArray(aiAlloc.order)?aiAlloc.order:[]).filter(id=>allIds.includes(id));
+    allIds.forEach(id=>{ if(!ord.includes(id)) ord.push(id); });
+    const focus={};
+    (aiAlloc&&Array.isArray(aiAlloc.months)?aiAlloc.months:[]).forEach(m=>{
+      if(!m||!m.ym) return;
+      const f=(Array.isArray(m.focus)?m.focus:[]).filter(x=>x&&allIds.includes(x.id)&&+x.pct>0)
+        .map(x=>({id:x.id,pct:+x.pct||0}));
+      const tot=f.reduce((a,x)=>a+x.pct,0);
+      if(f.length) focus[m.ym]=f.map(x=>({id:x.id,pct:Math.round(x.pct/(tot||1)*100)}));
+    });
+    if(aiAlloc&&(ord.length<allIds.length||Object.keys(focus).length))
+      aiInfo={mode:aiAlloc.mode==="sequential"?"sequential":"mixed",order:ord,focus,
+        notes:String(aiAlloc.notes||"").slice(0,400)};
+  }
+  const order=aiInfo
+    ? subj.slice().sort((a,b)=>aiInfo.order.indexOf(a.id)-aiInfo.order.indexOf(b.id))
+    : [...subj].sort((a,b)=>(b.weight||1)-(a.weight||1));
   const calcPool=subj.filter(x=>x.cat==="calc"), memPool=subj.filter(x=>x.cat==="mem"), mixPool=subj.filter(x=>x.cat==="mix");
   const allocW=alloc(brushW,[...calcPool,...mixPool]);
   const allocE=alloc(brushE,[...memPool,...mixPool]);
@@ -1869,7 +2051,6 @@ gen(){
     kpTitles[x.id]=ks.map(k=>String(k.title||"").trim()).filter(Boolean).slice(0,80);
   });
   const curKp={}; subj.forEach(x=>curKp[x.id]=0);
-  const order=[...subj].sort((a,b)=>(b.weight||1)-(a.weight||1));
   const months=[]; const byYm={};
   dates.forEach((d,i)=>{
     const ym=fmtD(d).slice(0,7);
@@ -1881,12 +2062,25 @@ gen(){
   });
   months.forEach(m=>{
     m.brushGoal=m.ds.reduce((a,d)=>a+dayTargetFor(fmtD(d)).brush,0);
-    m.subjects=order.slice(0,5).map(x=>({id:x.id,title:x.title,weight:x.weight,cat:x.cat}));
+    /* 月主攻: AI 分配了该月占比则按占比(含 pct), 否则按权重前5 */
+    m.subjects=(aiInfo&&aiInfo.focus[m.ym])
+      ? aiInfo.focus[m.ym].map(f=>{ const x=subj.find(s2=>s2.id===f.id)||{};
+          return {id:f.id,title:x.title||f.id,weight:x.weight,cat:x.cat,pct:f.pct}; })
+      : order.slice(0,5).map(x=>({id:x.id,title:x.title,weight:x.weight,cat:x.cat}));
     const ws=[]; let seg=[];
     m.ds.forEach(d=>{ if(d.getDay()===1&&seg.length){ ws.push(seg); seg=[]; } seg.push(d); });
     if(seg.length) ws.push(seg);
     m.weeks=ws.map((sg,wi)=>{
-      const picks=[order[(wi*3)%order.length],order[(wi*3+1)%order.length],order[(wi*3+2)%order.length]].filter(Boolean);
+      /* 周科目选取: AI 单科推进 → 本月主科(末周带衔接科); AI 混配 → 按月内科目轮转; 默认 → 权重轮转 */
+      let picks;
+      if(aiInfo&&m.subjects.length){
+        if(aiInfo.mode==="sequential"){
+          picks=wi>=ws.length-1&&m.subjects.length>1?m.subjects.slice(0,2):m.subjects.slice(0,1);
+        } else {
+          const n=Math.min(m.subjects.length,3);
+          picks=[0,1,2].slice(0,n).map(k=>m.subjects[(wi+k)%m.subjects.length]);
+        }
+      } else picks=[order[(wi*3)%order.length],order[(wi*3+1)%order.length],order[(wi*3+2)%order.length]].filter(Boolean);
       const items=picks.map(x=>{ const pool=kpTitles[x.id]||[]; const take=[];
         for(let t=0;t<4&&curKp[x.id]<pool.length;t++){ take.push(pool[curKp[x.id]++]); }
         return {id:x.id,title:x.title,cat:x.cat,kps:take}; });
@@ -1897,7 +2091,10 @@ gen(){
   // ---- P6: 课程排程 —— 各科未看完的视频在"该科出现的周"里顺序推进 ----
   const courseStat=this.scheduleCourses(months);
   months.forEach(m=>delete m.ds);
-  ST.plan={engine:"deterministic",v:2,source:"确定性引擎",generatedAt:today0,examName:s.examName,examDate,days,total,done,remaining,
+  ST.plan={engine:aiInfo?"ai-alloc":"deterministic",v:2,
+    source:aiInfo?("AI 智能排程 · "+(aiInfo.mode==="sequential"?"单科推进":"科目混配")):"确定性引擎",
+    aiMode:aiInfo?aiInfo.mode:undefined,aiNotes:aiInfo?aiInfo.notes:undefined,
+    generatedAt:today0,examName:s.examName,examDate,days,total,done,remaining,
     weekdayMin:+s.weekdayMin,weekendMin:+s.weekendMin,weekendFactor:wk,pomo,factor,learnRatio:s.learnRatio||{base:60,mid:40,sprint:15},
     brushW,brushE,newW,newE,catRouting:{calc:"工作日主攻",mem:"周末背诵",mix:"工作日原理+周末综合"},
     phases,subjectPlan,mockDays,weekdayTemplate,weekendTemplate,months,courseStat,adj};
@@ -2154,6 +2351,58 @@ ${adjust&&ST.aiPlan&&ST.aiPlan.md?"【已有计划与最新进度】保留已完
     ST.aiPlan={md:txt,generatedAt:today(),adjusted:!!adjust}; Store.save("aiPlan");
     this.renderAi(); toast(adjust?"AI 已按进度调整计划":"AI 计划已生成");
   }catch(e){ if(out) out.innerHTML='<div class="muted" style="color:#c0392b">生成失败: '+esc(String(e.message||e))+'<br>请检查 AI 接口配置(地址/Key/模型名)或换支持浏览器直连的服务商。</div>'; }
+},
+/* ---- P7: AI 深度排程 —— AI 自行分析各科知识点数量/课程时长/难易度, 结合放弃科目与工作日/周末时间,
+        直接输出月度科目分配(单科推进 or 混配), 并驱动计划引擎落位到周/天任务。 ---- */
+async aiSched(){
+  const cfg=ST.settings.ai||{};
+  if(!cfg.url||!cfg.key){ toast("请先到 设置 → AI 接口 填写接口地址与密钥"); return; }
+  const mode=(($("#ai-mode")||{}).value)||"mixed";
+  const all=this.subjects();
+  const act=all.filter(x=>x.mode!=="skip"), skip=all.filter(x=>x.mode==="skip");
+  const load=act.map(x=>{ const l=this.subjLoad(x.id);
+    return {id:x.id,title:x.title,cat:x.cat,weight:x.weight,kps:l.kps,
+      lessonLeft:l.lessons-l.done,lessons:l.lessons,lessonEstMin:l.estMin,
+      qRem:l.qRem,qTotal:l.qTotal,acc:x.qAcc,examScore:x.examCount*x.score}; });
+  const hds=(ST.holidays||[]).filter(h=>h&&h.start&&h.end&&h.end>=today());
+  const daysN=ST.settings.examDate?Math.max(0,Math.ceil((new Date(ST.settings.examDate)-Date.now())/864e5)):90;
+  const monthsN=Math.min(12,Math.max(1,Math.ceil(daysN/30)));
+  const yms=[]; { const d0=new Date();
+    for(let i=0;i<monthsN;i++){ const d=new Date(d0.getFullYear(),d0.getMonth()+i,1);
+      yms.push(d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")); } }
+  const prompt=`你是备考排程引擎。请根据以下数据, 把未来 ${monthsN} 个月的复习时间分配到各科目, 输出严格 JSON。
+【用户约束】考试: ${ST.settings.examName||""}；日期: ${ST.settings.examDate||"未设置"}；工作日 ${+ST.settings.weekdayMin||90}分钟/天, 周末 ${+ST.settings.weekendMin||240}分钟/天；目标分 ${ST.settings.targetScore||132}。
+【分配模式】用户选择: ${mode==="sequential"?"sequential(单科推进: 一科基本过关后再学下一科, 尽量不并行)":"mixed(科目混配: 同期 2~3 科穿插, 换脑子)"}。mode 字段必须等于该值。
+【已放弃科目】${skip.map(x=>x.title).join("、")||"无"}。
+【科目数据】每行: id|名称|类别(calc理解/mem记忆/mix综合)|权重|知识点数|课程:剩余讲/总讲/剩余估时分钟|题目:剩余/总量|已刷正确率|考纲分值
+${load.map(l=>`${l.id}|${l.title}|${l.cat}|${l.weight}|${l.kps}|${l.lessonLeft}/${l.lessons}/${l.lessonEstMin}|${l.qRem}/${l.qTotal}|${l.acc}%|${l.examScore}`).join("\n")}
+【未来月份】${yms.join(", ")}
+【假期】${hds.length?hds.map(h=>h.start+"~"+h.end).join("、"):"无"}
+【要求】
+1. order: 全部纳入科目的学习先后顺序(综合知识点量、课程估时、难易与分值性价比排序)。
+2. months: 每月 focus 给出该月时间占比, 每月合计≈100。sequential 模式每月 focus 通常只含 1 科(衔接月可 2 科)；mixed 模式每月 2~3 科。
+3. 课程估时大的科目要给足月份; 正确率低的科目适当多配; 记忆型(mem)科目靠近考试月份占比应提高。
+4. notes: 一两句话说明分配理由。
+只输出 JSON 本体, 不要代码块、不要解释。格式:
+{"mode":"${mode}","order":["科目id",...],"months":[{"ym":"${yms[0]||"2026-10"}","focus":[{"id":"科目id","pct":60},...]},...],"notes":"..."}`;
+  const out=$("#ai-plan-out"); if(out) out.innerHTML='<div class="muted">🤖 AI 正在分析各科知识点数量 / 课程剩余时长 / 难易度, 并分配每月任务…(本地模型约 1~3 分钟, 请勿关闭页面)</div>';
+  try{
+    const r=await fetch(cfg.url.replace(/\/+$/,"")+"/chat/completions",{method:"POST",
+      headers:{"Content-Type":"application/json",Authorization:"Bearer "+cfg.key},
+      body:JSON.stringify({model:cfg.model||"deepseek-chat",messages:[{role:"user",content:prompt}],temperature:0.2})});
+    if(!r.ok) throw new Error("HTTP "+r.status+" "+(await r.text()).slice(0,140));
+    const j=await r.json();
+    const txt=(j.choices[0].message.content||"").trim().replace(/^```(json)?\s*/i,"").replace(/```\s*$/,"").trim();
+    const m=txt.match(/\{[\s\S]*\}/); if(!m) throw new Error("未解析到 JSON 分配结果");
+    const alloc=JSON.parse(m[0]);
+    if(alloc.mode!=="sequential"&&alloc.mode!=="mixed") alloc.mode=mode;
+    this.gen(alloc);
+    const nm=id=>{ const sj=this.syllabus().find(x=>x.id===id); return sj?sj.title:id; };
+    if(out) out.innerHTML=`<div class="muted" style="margin-top:8px">✅ AI 排程已生效并写入每日任务: <b>${esc(alloc.mode==="sequential"?"单科推进(过关再下一科)":"科目混配(多科穿插)")}</b></div>
+      <div class="muted" style="margin-top:4px;font-size:12px">顺序: ${esc((alloc.order||[]).slice(0,8).map(nm).join(" → "))}${(alloc.order||[]).length>8?" …":""}</div>
+      ${alloc.notes?`<div class="muted" style="margin-top:4px;font-size:12px">AI 说明: ${esc(alloc.notes)}</div>`:""}`;
+    toast("AI 智能排程已生成: 月/周/天任务已按 "+(alloc.mode==="sequential"?"单科推进":"科目混配")+"落位");
+  }catch(e){ if(out) out.innerHTML='<div class="muted" style="color:#c0392b">AI 排程失败: '+esc(String(e.message||e))+'<br>可直接用下方「确定性规划」兜底生成。</div>'; }
 },
 renderAi(){
   const out=$("#ai-plan-out"); if(!out) return;
@@ -2944,7 +3193,7 @@ function vLib(){
     <div class="row" style="margin-top:6px;flex-wrap:wrap">
       <input id="vid-title" placeholder="标题(可选)" style="width:140px">
       <input id="vid-url" placeholder="视频链接(URL, 如网课地址)" style="flex:1;min-width:200px">
-      <select id="vid-chap">${Lib.vidChapOptions("")}</select>
+      <select id="vid-chap">${Lib.vidSubjOptions("")}</select>
       <button class="btn sm" onclick="Lib.vidAddUrl()">添加链接</button>
       <label class="btn sm ghost" style="cursor:pointer">选本地文件(可多选)<input type="file" accept="video/*" multiple style="display:none" onchange="Lib.vidAddFile(this)"></label>
       <button class="btn sm ghost" onclick="Lib.toggleVidImport()">📥 批量导入</button></div>
@@ -2958,7 +3207,7 @@ function vLib(){
         oninput="Lib.vidPreview()"></textarea>
       <div class="row" style="margin-top:6px;flex-wrap:wrap;align-items:center">
         <label class="muted" style="font-size:11.5px">未指定章节时归类到</label>
-        <select id="vid-bulk-chap"><option value="__auto__">自动匹配(按名称里的章节关键字)</option>${Lib.vidChapOptions("").replace('<option value="">未分类</option>',"")}</select>
+        <select id="vid-bulk-chap"><option value="__auto__">自动匹配(按标题里的科目/章节名)</option>${Lib.vidSubjOptions("").replace('<option value="">未分类</option>',"")}</select>
         <button class="btn sm" onclick="Lib.vidImportBatch()">开始导入</button>
         <label class="btn sm ghost" style="cursor:pointer">导入清单文件<input type="file" accept=".txt,.csv,.m3u,.json" style="display:none" onchange="Lib.vidImportFile(this)"></label>
         <span class="muted" id="vid-import-sum" style="font-size:11.5px"></span></div>
@@ -2967,8 +3216,8 @@ function vLib(){
     <div class="row" style="margin-top:6px"><input id="vid-kw" placeholder="按标题/章节筛选..." style="flex:1" oninput="Lib.vidRender()"></div>
     <div class="row" style="margin-top:6px;align-items:center;flex-wrap:wrap">
       <span class="muted" style="font-size:11.5px">批量操作:</span>
-      <select id="vid-retag">${Lib.vidChapOptions("")}</select>
-      <button class="btn sm ghost" onclick="Lib.vidRetagFiltered()">把当前筛选结果归类到该章节</button>
+      <select id="vid-retag">${Lib.vidSubjOptions("")}</select>
+      <button class="btn sm ghost" onclick="Lib.vidRetagFiltered()">把当前筛选结果归类到该科目</button>
       <button class="btn sm bad" onclick="Lib.vidClearLocal()">清理已失效本地视频</button>
       <span class="muted" style="font-size:11.5px">共 ${(ST.videos||[]).length} 个</span></div>
     <div id="vid-list" class="row" style="margin-top:8px;flex-wrap:wrap"></div>
@@ -2983,9 +3232,22 @@ function vLib(){
     document.addEventListener("visibilitychange",Lib._vis); }
 }
 
-/* ---- 视频资料库 ---- */
-Lib.vidChapOptions=function(cur){
-  return '<option value="">未分类</option>'+(BANK.chapters||[]).map(c=>`<option value="${c.id}" ${cur===c.id?"selected":""}>${esc(c.title)}</option>`).join("");
+/* ---- 视频资料库 (P7: 分类下拉改为考纲科目 —— 各文件资料内章节保留在标题里, 统计/计划一律按科目归属) ---- */
+Lib.vidSubjOptions=function(cur){
+  return '<option value="">未分类</option>'+Plan.syllabus().map(s=>`<option value="${s.id}" ${cur===s.id?"selected":""}>${esc(s.title)}</option>`).join("");
+};
+Lib.resolveSubj=function(name){ const sj=Plan.subjByName(name); return sj?sj.id:""; };
+Lib.subjTitle=function(v){ if(!v) return "未分类";
+  if(v.subjectId){ const s=Plan.syllabus().find(x=>x.id===v.subjectId); if(s) return s.title; }
+  const sj=v.chapterId?Plan.subjOfCh(v.chapterId):null;
+  return sj?sj.title:(chapPath(v.chapterId)||"未分类"); };
+/* 旧数据迁移: 只有 chapterId 的视频按章节映射补 subjectId */
+Lib.migrateVidSubj=function(){
+  let ch=false;
+  (ST.videos||[]).forEach(v=>{ if(!v||v.subjectId) return;
+    const sj=v.chapterId?Plan.subjOfCh(v.chapterId):null;
+    if(sj){ v.subjectId=sj.id; ch=true; } });
+  if(ch) Store.save("videos");
 };
 /* ---- P6: 视频批量导入 ---- */
 Lib.toggleVidImport=function(){ const b=$("#vid-import-box"); if(b) b.style.display=b.style.display==="none"?"block":"none"; };
@@ -3061,12 +3323,13 @@ Lib.vidImportBatch=function(){
   rows.forEach((r,i)=>{
     if(exist.has(r.url)){ skipped++; return; }
     exist.add(r.url);
-    let cid="";
-    if(r.chap) cid=this.resolveChap(r.chap);
-    if(!cid&&def!=="__auto__") cid=def;
-    if(!cid){ cid=this.resolveChap(r.title)||this.resolveChap(this._titleFromUrl(r.url)); if(cid) auto++; }
+    let cid="",sid="";
+    if(r.chap){ sid=this.resolveSubj(r.chap); cid=this.resolveChap(r.chap); }
+    if(!sid&&def!=="__auto__") sid=def;
+    if(!sid){ sid=this.resolveSubj(r.title)||this.resolveSubj(this._titleFromUrl(r.url)); if(sid) auto++; }
+    if(!cid){ cid=this.resolveChap(r.title)||this.resolveChap(this._titleFromUrl(r.url)); }
     const title=(r.title||"").trim()||this._titleFromUrl(r.url)||("视频 "+(ST.videos.length+1));
-    ST.videos.push({id:"v"+t0+"_"+i,title,url:r.url,chapterId:cid,pos:0,rate:1,dur:0,ts:t0+i});
+    ST.videos.push({id:"v"+t0+"_"+i,title,url:r.url,chapterId:cid,subjectId:sid,pos:0,rate:1,dur:0,ts:t0+i});
     added++;
   });
   Store.save("videos"); Lib.vidRender();
@@ -3078,15 +3341,16 @@ Lib.vidImportBatch=function(){
   } else if(added&&ST.plan){ planMsg=" · 重新生成计划后排入每日任务"; }
   toast(`导入完成: 新增 ${added}${skipped?" · 跳过重复 "+skipped:""}${auto?" · 自动归类 "+auto:""}${planMsg}`);
 };
-/* 把当前筛选结果批量归类到某章节 */
+/* 把当前筛选结果批量归类到某考纲科目 */
 Lib.vidRetagFiltered=function(){
-  const cid=(($("#vid-retag")||{}).value)||"";
+  const sid=(($("#vid-retag")||{}).value)||"";
   const kw=((($("#vid-kw")||{}).value)||"").toLowerCase();
-  const hits=(ST.videos||[]).filter(v=>!kw||(v.title||"").toLowerCase().includes(kw)||(v.chapterId||"").toLowerCase().includes(kw));
+  const hits=(ST.videos||[]).filter(v=>!kw||(v.title||"").toLowerCase().includes(kw)||this.subjTitle(v).toLowerCase().includes(kw));
   if(!hits.length){ toast("当前筛选没有视频"); return; }
-  if(!confirm(`把当前筛选的 ${hits.length} 个视频归类到「${cid?chapPath(cid):"未分类"}」?`)) return;
-  hits.forEach(v=>v.chapterId=cid); Store.save("videos"); Lib.vidRender();
-  toast("已归类 "+hits.length+" 个视频");
+  const name=sid?((Plan.syllabus().find(x=>x.id===sid)||{}).title||"未知科目"):"未分类";
+  if(!confirm(`把当前筛选的 ${hits.length} 个视频归类到「${name}」?`)) return;
+  hits.forEach(v=>v.subjectId=sid); Store.save("videos"); Lib.vidRender();
+  toast("已归类 "+hits.length+" 个视频到「"+name+"」");
 };
 /* 清理 blob: 链接失效的本地视频记录(进度仍保留在同名记录里) */
 /* 本地文件在本会话内创建的 blob: 地址才有效; 上一个会话遗留的一律视为失效 */
@@ -3105,8 +3369,9 @@ Lib.vidAddUrl=function(){
   const exist=ST.videos.some(v=>v.url===url);
   if(exist){ toast("该链接已在列表中, 已跳过"); $("#vid-url").value=""; return; }
   const title=$("#vid-title").value.trim()||this._titleFromUrl(url)||("视频 "+(ST.videos.length+1));
+  const sid=$("#vid-chap").value||this.resolveSubj(title)||"";
   ST.videos.push({id:"v"+Date.now(),title,url,
-    chapterId:$("#vid-chap").value||this.resolveChap(title)||"",pos:0,rate:1,dur:0,ts:Date.now()});
+    chapterId:this.resolveChap(title)||"",subjectId:sid,pos:0,rate:1,dur:0,ts:Date.now()});
   Store.save("videos"); $("#vid-url").value=""; $("#vid-title").value="";
   Lib.vidRender(); toast("视频已添加");
 };
@@ -3118,7 +3383,8 @@ Lib.vidAddFile=function(inp){
   fs.forEach((f,i)=>{
     const prev=ST.videos.find(x=>x.title===f.name&&x.local);   // 同名文件恢复上次进度
     ST.videos.push({id:"v"+Date.now()+"_"+i,title:f.name,url:URL.createObjectURL(f),local:true,
-      chapterId:chap||this.resolveChap(f.name)||(prev&&prev.chapterId)||"",sess:Lib._sess,
+      chapterId:(prev&&prev.chapterId)||this.resolveChap(f.name)||"",
+      subjectId:chap||this.resolveSubj(f.name)||(prev&&prev.subjectId)||"",sess:Lib._sess,
       pos:(prev&&prev.pos)||0,rate:(prev&&prev.rate)||1,dur:(prev&&prev.dur)||0,ts:Date.now()+i});
     if(prev) restored++; added++;
   });
@@ -3135,13 +3401,14 @@ Lib.vidRender=function(){
   const box=$("#vid-list"); if(!box) return;
   ST.videos=ST.videos||[];
   const kw=((($("#vid-kw")||{}).value)||"").toLowerCase();
-  const items=ST.videos.filter(v=>!kw||(v.title||"").toLowerCase().includes(kw)||(v.chapterId||"").toLowerCase().includes(kw));
+  const items=ST.videos.filter(v=>{ if(!kw) return true;
+    return (v.title||"").toLowerCase().includes(kw)||this.subjTitle(v).toLowerCase().includes(kw); });
   box.innerHTML=items.length?items.map(v=>{
     const pct=v.dur?Math.min(100,Math.round((v.pos||0)/v.dur*100)):0;
     return `<div class="opt" style="width:auto;min-width:230px;max-width:280px" onclick="Lib.vidPlay('${v.id}')">
       <div class="row" style="justify-content:space-between"><b style="font-size:12px">${esc((v.title||"").slice(0,22))}</b><span class="muted">${v.rate||1}x</span></div>
       <div class="bar" style="margin:6px 0"><i style="width:${pct}%"></i></div>
-      <div class="muted" style="font-size:11px">${esc(chapPath(v.chapterId)||"未分类")} · ${v.local?"本地":"链接"} · 已看 ${pct}%</div>
+      <div class="muted" style="font-size:11px">${esc(this.subjTitle(v))} · ${v.local?"本地":"链接"} · 已看 ${pct}%</div>
       <button class="btn sm bad" style="margin-top:4px" onclick="event.stopPropagation();Lib.vidDel('${v.id}')">删除</button></div>`;
   }).join(""):'<span class="muted">暂无视频, 在上方添加链接或选择本地文件</span>';
 };
@@ -3156,8 +3423,8 @@ Lib.vidPlay=function(id){
       <span class="muted">倍速</span>
       ${[0.75,1,1.25,1.5,1.75,2].map(r=>`<button class="btn sm ${(v.rate||1)===r?"":"ghost"}" onclick="Lib.vidRate(${r})">${r}x</button>`).join("")}
       <span class="muted grow" id="vid-stat"></span>
-      <label class="muted">分类</label>
-      <select onchange="Lib.vidChap(this.value)">${Lib.vidChapOptions(v.chapterId)}</select></div></div>`;
+      <label class="muted">分类(考纲科目)</label>
+      <select onchange="Lib.vidSubj(this.value)">${Lib.vidSubjOptions(v.subjectId||"")}</select></div></div>`;
   area.scrollIntoView({behavior:"smooth",block:"nearest"});
 };
 Lib.vidCur=function(){ return (ST.videos||[]).find(x=>x.id===Lib._curVid); };
@@ -3180,9 +3447,9 @@ Lib.vidRate=function(r){
   v.rate=r; if(el) el.playbackRate=r;
   Store.save("videos"); Lib.vidPlay(v.id);   // 重绘按钮选中态
 };
-Lib.vidChap=function(cid){
+Lib.vidSubj=function(sid){
   const v=Lib.vidCur(); if(!v) return;
-  v.chapterId=cid||""; Store.save("videos"); Lib.vidRender();
+  v.subjectId=sid||""; Store.save("videos"); Lib.vidRender();
 };
 
 /* ================= 路由 ================= */
@@ -3356,6 +3623,7 @@ function renderWeekly(box){
   Imports.apply();
   buildIndexes();
   try{ Plan.migrateSubj(); Plan.ensureTasks(); }catch(e){}
+  try{ Lib.migrateVidSubj(); }catch(e){}
   route();
   /* PWA: 注册 Service Worker (网络优先, 只做离线兜底, 不会缓存旧版页面);
      本地 file:// 打开或浏览器不支持时静默跳过 */
