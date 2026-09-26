@@ -1,7 +1,10 @@
 /* 备考工作台 Service Worker
-   策略: 导航(HTML)与图片等请求均为 network-first —— 有网永远拿最新版, 无网才回退缓存;
-   缓存只在成功响应后被动写入, 不预缓存, 避免出现「改了不生效」的旧缓存问题。 */
-const CACHE = "beikao-v1";
+   策略(性能双轨版): 同源 GET 资源(HTML 壳 / data/*.data.js / vendor / icons / manifest) 全部走
+   「缓存优先 + 后台静默更新」(stale-while-revalidate)。
+   - 平时刷新: 立即命中缓存, 秒开;
+   - 后台拉新版写入缓存, 下次打开自动生效 —— 同时兼顾「改了要生效」与「刷新要快」。
+   版本号由 scripts/build_app.py 注入(beikao-<git-sha>), 每次部署自动失效旧缓存、拉取新资源。 */
+const CACHE = "beikao-1790388604";
 
 self.addEventListener("install", e => self.skipWaiting());
 self.addEventListener("activate", e => {
@@ -16,26 +19,29 @@ self.addEventListener("fetch", e => {
   const req = e.request;
   if (req.method !== "GET") return;
   const url = new URL(req.url);
-  if (url.origin !== location.origin) return;   // 跨域(如 Supabase ESM)不代理, 保持直连
-  // KaTeX 等静态资源现已本地化(vendor/), 同源 GET 走 network-first + 被动缓存, 离线可用
-  // 大体积整页原图不缓存 (raw_pages*), 其他同源资源 network-first + 被动缓存
+  if (url.origin !== location.origin) return;   // 跨域(Supabase 等)直连, 不代理
+  // 整页原图(raw_pages*)体积过大, 不进缓存, 始终走网络
   const isHugePageImg = /\/data\/raw_pages[^/]*\//.test(url.pathname);
   e.respondWith((async () => {
-    try {
-      const fresh = await fetch(req);
-      if (fresh && fresh.ok && !isHugePageImg) {
-        const cache = await caches.open(CACHE);
-        cache.put(req, fresh.clone()).catch(() => {});
-      }
+    const cache = await caches.open(CACHE);
+    const cached = await cache.match(req);
+    const update = fetch(req).then(fresh => {
+      if (fresh && fresh.ok && !isHugePageImg) cache.put(req, fresh.clone()).catch(() => {});
       return fresh;
-    } catch (err) {
-      const hit = await caches.match(req, { ignoreSearch: req.mode === "navigate" });
-      if (hit) return hit;
-      if (req.mode === "navigate") {
-        const shell = await caches.match("./index.html");
-        if (shell) return shell;
-      }
-      throw err;
+    }).catch(() => null);
+    // 有缓存: 立即返回(秒开), 后台静默刷新缓存, 不阻塞
+    if (cached) {
+      update.catch(() => {});
+      return cached;
     }
+    // 无缓存(首次/新部署): 等网络结果
+    const fresh = await update;
+    if (fresh) return fresh;
+    // 无缓存且网络失败: 导航请求回退到已缓存的壳
+    if (req.mode === "navigate") {
+      const shell = await cache.match("./index.html");
+      if (shell) return shell;
+    }
+    throw new TypeError("offline & no cache: " + url.pathname);
   })());
 });
