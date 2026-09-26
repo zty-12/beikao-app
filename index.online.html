@@ -2143,7 +2143,9 @@ async function aiChat(prompt,opts){
         const isLocal=/^(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|\[::1)/i.test(host);
         if(!isLocal) pu="https:"+pu.slice(5);
       }
-      const anon=(ST.settings.supabaseKey||"").trim();
+      /* 网关 JWT: 中转函数所属项目若非本同步项目, 必须填该项目的 anon key(proxyAnon);
+         同项目部署则自动复用同步配置的 anon key */
+      const anon=String(cfg.proxyAnon||"").trim()||String(ST.settings.supabaseKey||"").trim();
       const hd={"Content-Type":"application/json","x-proxy-token":String(cfg.proxyToken).trim()};
       if(anon){ hd.apikey=anon; hd.Authorization="Bearer "+anon; }        // 通过网关 JWT 校验
       else hd.Authorization="Bearer "+String(cfg.proxyToken).trim();       // 兼容: 需关闭函数的 JWT 校验
@@ -2161,6 +2163,7 @@ async function aiChat(prompt,opts){
       if(!r.ok){
         const tx=await r.text().catch(()=>"" ); let d=tx.slice(0,200);
         try{ const j=JSON.parse(tx); if(j&&typeof j.error==="string") d=j.error; }catch(e){}
+        if(/UNAUTHORIZED_LEGACY_JWT/i.test(tx||d)) throw new Error("中转网关 JWT 校验未通过(UNAUTHORIZED_LEGACY_JWT): 中转函数属于另一个 Supabase 项目, 而前端只带了本同步项目的 anon key。解决: ① 在「中转项目 anon key」里填中转函数所属项目的 anon key (Supabase 控制台 → Settings → API → anon public); 或 ② 把 llm-proxy 部署到本同步项目 (URL 会自动派生, anon key 自动匹配)。");
         if(r.status===401) throw new Error("中转鉴权失败(401): 中转 Token 与 Supabase Secrets 里的 LLM_PROXY_TOKEN 不一致, 或函数仍是旧版未读取 x-proxy-token 头。(原始响应: "+d+")");
         throw new Error("中转错误 HTTP "+r.status+": "+d);
       }
@@ -3317,10 +3320,12 @@ function vSet(){
       <div class="row" style="flex-wrap:wrap">
         <input id="set-aiproxyurl" placeholder="Edge Function URL, 如 https://xxx.supabase.co/functions/v1/llm-proxy" value="${esc((ST.settings.ai||{}).proxyUrl||"")}" style="flex:2;min-width:260px">
         <input id="set-aiproxytoken" placeholder="中转 Token (= Supabase Secret 里的 LLM_PROXY_TOKEN)" value="${esc((ST.settings.ai||{}).proxyToken||"")}" style="flex:1;min-width:180px">
+        <input id="set-aiproxyanon" placeholder="中转项目 anon key (跨项目时填, 留空=用同步项目的)" value="${esc((ST.settings.ai||{}).proxyAnon||"")}" style="flex:1;min-width:220px">
         <button class="btn sm ghost" onclick="Settings.copyProxyFn()">📋 复制函数源码</button></div>
       <div class="muted" style="margin-top:8px;font-size:11px;line-height:1.7">跨域(CORS)被服务商拒绝时选中转: 浏览器只请求 Supabase, 由 Edge Function 服务端转发到真实 LLM。上游 baseUrl/apiKey 放请求体里经服务端读取, 前端共享密钥经 <code>x-proxy-token</code> 头携带。<br>
       <b>首次部署</b>: ① Supabase 控制台 → Edge Functions → New Function 命名 <code>llm-proxy</code> → 点「📋 复制函数源码」粘贴部署; ② 项目 Secrets 加 <code>LLM_PROXY_TOKEN</code>(自选随机串, 与上面中转 Token 填一致); ③ Edge Function URL 填 <code>https://&lt;项目名&gt;.supabase.co/functions/v1/llm-proxy</code>。若上方 Supabase 同步已配置, 网关 JWT 校验会自动复用其 anon key。<br>
-      提示 401: 确认中转 Token 与 Secrets 一致, 或函数设置里关闭「Enforce JWT verification」。</div></div>
+      提示 401: 确认中转 Token 与 Secrets 一致, 或函数设置里关闭「Enforce JWT verification」。<br>
+      <b>跨项目复用</b> (如借用教务工作台的 llm-proxy): 函数 URL 填对方地址后, 还须在「中转项目 anon key」填<b>对方项目</b>的 anon key (对方 Supabase 控制台 → Settings → API), 否则网关 JWT 校验会报 UNAUTHORIZED_LEGACY_JWT; 且中转 Token 须与对方项目 Secrets 里的 LLM_PROXY_TOKEN 一致。</div></div>
     <div class="muted" style="margin-top:8px">支持任何 OpenAI 兼容接口 (DeepSeek / 硅基流动 / Kimi / 商汤等); Key 仅保存在本地浏览器, 不随同步上传。直连模式若提示跨域(CORS)失败, 改用上方「经 Edge Function 中转」即可; HTTPS 页面填 http:// 公网地址会自动升级为 https。</div></div>
   <div class="card"><h2 style="font-size:14px">数据管理</h2><div class="row" style="margin-top:8px;flex-wrap:wrap">
     <button class="btn sm ghost" onclick="Settings.exportAll(0)">导出进度 (JSON)</button>
@@ -3374,7 +3379,8 @@ const Settings={
     ST.settings.ai={url:$("#set-aiurl").value.trim(),key:$("#set-aikey").value.trim(),model:$("#set-aimodel").value.trim()||"deepseek-chat",
       mode:$("#set-aimode")?$("#set-aimode").value:"direct",
       proxyUrl:$("#set-aiproxyurl")?$("#set-aiproxyurl").value.trim():"",
-      proxyToken:$("#set-aiproxytoken")?$("#set-aiproxytoken").value.trim():""};
+      proxyToken:$("#set-aiproxytoken")?$("#set-aiproxytoken").value.trim():"",
+      proxyAnon:$("#set-aiproxyanon")?$("#set-aiproxyanon").value.trim():""};
     /* 选中转但 URL 留空时, 从 Supabase 同步地址自动派生 */
     if(ST.settings.ai.mode==="proxy"&&!ST.settings.ai.proxyUrl&&ST.settings.supabaseUrl)
       ST.settings.ai.proxyUrl=ST.settings.supabaseUrl.replace(/\/+$/,"")+"/functions/v1/llm-proxy";
