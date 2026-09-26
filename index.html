@@ -2132,6 +2132,46 @@ async function aiChat(prompt,opts){
   const tm=setTimeout(()=>{ if(ctrl) ctrl.abort(); },tmo);
   try{
     let r;
+    /* 中转模式: 经 Supabase Edge Function llm-proxy 转发, 规避服务商 CORS 限制
+       上游 baseUrl/apiKey 放请求体(服务端读取); 共享密钥走 x-proxy-token 头;
+       anon key(若已配 Supabase 同步)作 Authorization 通过网关 JWT 校验 */
+    if(cfg.mode==="proxy"){
+      let pu=String(cfg.proxyUrl||"").trim();
+      if(!pu||!cfg.proxyToken) throw new Error("请求模式为「经 Edge Function 中转」, 请到 设置 → AI 接口 填写 Edge Function URL 与中转 Token");
+      if(typeof location!=="undefined"&&location.protocol==="https:"&&/^http:\/\//i.test(pu)){
+        const host=(pu.match(/^http:\/\/([^\/:?#]+)/i)||[])[1]||"";
+        const isLocal=/^(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|\[::1)/i.test(host);
+        if(!isLocal) pu="https:"+pu.slice(5);
+      }
+      const anon=(ST.settings.supabaseKey||"").trim();
+      const hd={"Content-Type":"application/json","x-proxy-token":String(cfg.proxyToken).trim()};
+      if(anon){ hd.apikey=anon; hd.Authorization="Bearer "+anon; }        // 通过网关 JWT 校验
+      else hd.Authorization="Bearer "+String(cfg.proxyToken).trim();       // 兼容: 需关闭函数的 JWT 校验
+      try{
+        r=await fetch(pu,{method:"POST",headers:hd,signal:ctrl?ctrl.signal:undefined,
+          body:JSON.stringify({baseUrl:u,apiKey:cfg.key,model:cfg.model||"deepseek-chat",
+            messages:[{role:"user",content:prompt}],
+            temperature:opts.temperature==null?0.3:opts.temperature,
+            maxTokens:opts.max_tokens||undefined})});
+      }catch(ne){
+        const msg=String((ne&&ne.message)||ne);
+        if(/abort/i.test(msg)) throw new Error("请求超时(超过 "+Math.round(tmo/1000)+" 秒), 可重试或调大超时");
+        throw new Error("无法连接 Edge Function("+msg+")。请检查 URL 是否正确、Supabase 项目是否处于暂停状态");
+      }
+      if(!r.ok){
+        const tx=await r.text().catch(()=>"" ); let d=tx.slice(0,200);
+        try{ const j=JSON.parse(tx); if(j&&typeof j.error==="string") d=j.error; }catch(e){}
+        if(r.status===401) throw new Error("中转鉴权失败(401): 中转 Token 与 Supabase Secrets 里的 LLM_PROXY_TOKEN 不一致, 或函数仍是旧版未读取 x-proxy-token 头。(原始响应: "+d+")");
+        throw new Error("中转错误 HTTP "+r.status+": "+d);
+      }
+      const j2=await r.json().catch(()=>null);
+      const content=j2&&typeof j2.content==="string"?j2.content:"";
+      if(!content){
+        const snip=String((j2&&j2.error)||"").slice(0,180);
+        throw new Error("中转返回空内容"+(snip?("("+snip+")"):"")+"。常见原因: llm-proxy 是旧版(请重新部署)、上游模型把 max_tokens 花在了思考内容上");
+      }
+      return {choices:[{message:{content}}]};   // 统一形状, 复用 aiTxt
+    }
     try{
       const body={model:cfg.model||"deepseek-chat",messages:[{role:"user",content:prompt}],
         temperature:opts.temperature==null?0.3:opts.temperature};
@@ -3256,14 +3296,32 @@ function vSet(){
   <div class="card"><h2 style="font-size:14px">🔒 应用口令门</h2>
     <div class="muted" style="font-size:12px;margin:4px 0 8px">进站需先输口令（口令哈希存云端 beikao_state 表 id='gate' 行，明文不落盘不上云）；已验证过的设备一直免输，直到在此处被移除。需先配置好上方 Supabase 同步。</div>
     <div id="gate-admin"></div></div>
-  <div class="card"><h2 style="font-size:14px">AI 接口 (用于智能学习计划)</h2>
+  <div class="card"><h2 style="font-size:14px">AI 接口 (用于智能学习计划 / 闪卡优化 / AI 归并)</h2>
+    <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px">
+      <span class="muted" style="font-size:12px;align-self:center">提供商预设:</span>
+      ${Object.entries(AI_PROVIDERS).map(([n,p])=>`<button class="btn sm ghost" onclick="Settings.aiPreset('${n}')">${n}</button>`).join("")}
+      <span class="muted" style="font-size:11px;align-self:center">一键填入 Base URL 与默认模型</span></div>
     <div class="row" style="margin-top:8px;flex-wrap:wrap">
-      <input id="set-aiurl" placeholder="OpenAI 兼容接口, 如 https://api.deepseek.com/v1" value="${esc((ST.settings.ai||{}).url||"")}" style="flex:2;min-width:260px">
+      <input id="set-aiurl" placeholder="OpenAI 兼容接口 Base URL, 如 https://api.deepseek.com/v1" value="${esc((ST.settings.ai||{}).url||"")}" style="flex:2;min-width:260px">
       <input id="set-aikey" placeholder="API Key" value="${esc((ST.settings.ai||{}).key||"")}" style="flex:1;min-width:150px">
-      <input id="set-aimodel" placeholder="模型名, 如 deepseek-chat" value="${esc((ST.settings.ai||{}).model||"")}" style="width:150px">
+      <input id="set-aimodel" placeholder="模型名, 如 deepseek-chat" value="${esc((ST.settings.ai||{}).model||"")}" style="width:150px"></div>
+    <div class="row" style="margin-top:8px;flex-wrap:wrap">
+      <span class="muted" style="font-size:12px;align-self:center">请求模式</span>
+      <select id="set-aimode" onchange="Settings.aiModeToggle()" style="min-width:200px">
+        <option value="direct" ${((ST.settings.ai||{}).mode||"direct")==="direct"?"selected":""}>浏览器直连 (需服务商允许跨域)</option>
+        <option value="proxy" ${(ST.settings.ai||{}).mode==="proxy"?"selected":""}>经 Supabase Edge Function 中转 (规避 CORS)</option>
+      </select>
       <button class="btn sm" onclick="Settings.save()">保存</button>
       <button class="btn sm ghost" onclick="Settings.testAI()">测试连接</button></div>
-    <div class="muted" style="margin-top:8px">支持任何 OpenAI 兼容接口 (DeepSeek / 硅基流动 / Kimi 等); Key 仅保存在本地浏览器, 不随同步上传。若提示跨域(CORS)失败, 请换支持浏览器直连的服务商; HTTPS 页面填 http:// 地址会被浏览器拦截(混合内容)。</div></div>
+    <div id="ai-proxy-box" style="display:${(ST.settings.ai||{}).mode==="proxy"?"block":"none"};margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px">
+      <div class="row" style="flex-wrap:wrap">
+        <input id="set-aiproxyurl" placeholder="Edge Function URL, 如 https://xxx.supabase.co/functions/v1/llm-proxy" value="${esc((ST.settings.ai||{}).proxyUrl||"")}" style="flex:2;min-width:260px">
+        <input id="set-aiproxytoken" placeholder="中转 Token (= Supabase Secret 里的 LLM_PROXY_TOKEN)" value="${esc((ST.settings.ai||{}).proxyToken||"")}" style="flex:1;min-width:180px">
+        <button class="btn sm ghost" onclick="Settings.copyProxyFn()">📋 复制函数源码</button></div>
+      <div class="muted" style="margin-top:8px;font-size:11px;line-height:1.7">跨域(CORS)被服务商拒绝时选中转: 浏览器只请求 Supabase, 由 Edge Function 服务端转发到真实 LLM。上游 baseUrl/apiKey 放请求体里经服务端读取, 前端共享密钥经 <code>x-proxy-token</code> 头携带。<br>
+      <b>首次部署</b>: ① Supabase 控制台 → Edge Functions → New Function 命名 <code>llm-proxy</code> → 点「📋 复制函数源码」粘贴部署; ② 项目 Secrets 加 <code>LLM_PROXY_TOKEN</code>(自选随机串, 与上面中转 Token 填一致); ③ Edge Function URL 填 <code>https://&lt;项目名&gt;.supabase.co/functions/v1/llm-proxy</code>。若上方 Supabase 同步已配置, 网关 JWT 校验会自动复用其 anon key。<br>
+      提示 401: 确认中转 Token 与 Secrets 一致, 或函数设置里关闭「Enforce JWT verification」。</div></div>
+    <div class="muted" style="margin-top:8px">支持任何 OpenAI 兼容接口 (DeepSeek / 硅基流动 / Kimi / 商汤等); Key 仅保存在本地浏览器, 不随同步上传。直连模式若提示跨域(CORS)失败, 改用上方「经 Edge Function 中转」即可; HTTPS 页面填 http:// 公网地址会自动升级为 https。</div></div>
   <div class="card"><h2 style="font-size:14px">数据管理</h2><div class="row" style="margin-top:8px;flex-wrap:wrap">
     <button class="btn sm ghost" onclick="Settings.exportAll(0)">导出进度 (JSON)</button>
     <button class="btn sm ghost" onclick="Settings.exportAll(1)">导出完整备份（进度 + 导入题库）</button>
@@ -3282,6 +3340,14 @@ const SUPABASE_SCHEMA_SQL=`create table if not exists beikao_state (
 );
 alter table beikao_state enable row level security;
 create policy "anon_beikao_rw" on beikao_state for all to anon using (true) with check (true);`;
+/* 常用 OpenAI 兼容服务商预设: 一键填入 Base URL 与默认模型 */
+const AI_PROVIDERS={
+  "OpenAI":["https://api.openai.com/v1","gpt-4o-mini"],
+  "DeepSeek":["https://api.deepseek.com/v1","deepseek-chat"],
+  "通义千问":["https://dashscope.aliyuncs.com/compatible-mode/v1","qwen-plus"],
+  "Kimi":["https://api.moonshot.cn/v1","moonshot-v1-8k"],
+  "智谱GLM":["https://open.bigmodel.cn/api/paas/v4","glm-4-flash"]
+};
 const Settings={
   /* AI 连通性自检: 保存配置后发一个最小请求, 把具体失败原因(而不是笼统报错)告诉用户 */
   async testAI(){
@@ -3305,8 +3371,42 @@ const Settings={
   save(){ ST.settings.theme=$("#set-theme").value;
     ST.settings.supabaseUrl=$("#set-sburl").value.trim();
     ST.settings.supabaseKey=$("#set-sbkey").value.trim();
-    ST.settings.ai={url:$("#set-aiurl").value.trim(),key:$("#set-aikey").value.trim(),model:$("#set-aimodel").value.trim()||"deepseek-chat"};
+    ST.settings.ai={url:$("#set-aiurl").value.trim(),key:$("#set-aikey").value.trim(),model:$("#set-aimodel").value.trim()||"deepseek-chat",
+      mode:$("#set-aimode")?$("#set-aimode").value:"direct",
+      proxyUrl:$("#set-aiproxyurl")?$("#set-aiproxyurl").value.trim():"",
+      proxyToken:$("#set-aiproxytoken")?$("#set-aiproxytoken").value.trim():""};
+    /* 选中转但 URL 留空时, 从 Supabase 同步地址自动派生 */
+    if(ST.settings.ai.mode==="proxy"&&!ST.settings.ai.proxyUrl&&ST.settings.supabaseUrl)
+      ST.settings.ai.proxyUrl=ST.settings.supabaseUrl.replace(/\/+$/,"")+"/functions/v1/llm-proxy";
     Store.save("settings"); document.body.dataset.theme=ST.settings.theme; toast("已保存"); },
+  /* 服务商预设: 只填空字段, 不覆盖已填的 Key */
+  aiPreset(name){
+    const p=AI_PROVIDERS[name]; if(!p) return;
+    $("#set-aiurl").value=p[0]; $("#set-aimodel").value=p[1];
+    toast("已填入 "+name+" 的 Base URL 与默认模型, 填好 API Key 后点「保存」"); },
+  /* 请求模式切换: 显示/隐藏中转配置区, 并在可行时自动预填 Edge Function URL */
+  aiModeToggle(){
+    const m=$("#set-aimode").value;
+    const box=$("#ai-proxy-box"); if(box) box.style.display=m==="proxy"?"block":"none";
+    if(m==="proxy"&&!$("#set-aiproxyurl").value.trim()&&ST.settings.supabaseUrl){
+      $("#set-aiproxyurl").value=ST.settings.supabaseUrl.replace(/\/+$/,"")+"/functions/v1/llm-proxy";
+      toast("已按 Supabase 同步地址预填函数 URL, 还需部署 llm-proxy 并填中转 Token");
+    }
+  },
+  /* llm-proxy Edge Function 源码: 优先读线上部署的同仓库文件, 失败回退 GitHub raw */
+  async copyProxyFn(){
+    const GH="https://raw.githubusercontent.com/zty-12/beikao-app/main/supabase/llm-proxy/index.ts";
+    const useClipboard=t=>{ if(navigator.clipboard&&navigator.clipboard.writeText) return navigator.clipboard.writeText(t).then(()=>toast("llm-proxy 源码已复制, 去 Supabase → Edge Functions → New Function(llm-proxy) 粘贴部署"));
+      window.open(GH,"_blank"); toast("复制失败, 已打开源码页面, 请手动全选复制"); };
+    try{
+      const rr=await fetch("supabase/llm-proxy/index.txt",{cache:"no-store"});
+      if(!rr.ok) throw 0;
+      useClipboard(await rr.text());
+    }catch(e){
+      try{ const r2=await fetch(GH,{cache:"no-store"}); if(!r2.ok) throw 0; useClipboard(await r2.text()); }
+      catch(e2){ window.open(GH,"_blank"); toast("无法自动获取源码, 已在新标签打开 GitHub 页面"); }
+    }
+  },
   copySchema(){ const s=SUPABASE_SCHEMA_SQL; if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(s).then(()=>toast("建表 SQL 已复制，去 Supabase SQL 编辑器粘贴执行")).catch(()=>toast("复制失败，请手动选择下方 SQL")); } else { toast("当前环境不支持剪贴板，请手动复制"); } },
   async checkSupabase(){
     if(!ST.settings.supabaseUrl||!ST.settings.supabaseKey){ toast("请先填 URL 和 anon key"); return; }

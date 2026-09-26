@@ -1,0 +1,171 @@
+// Supabase Edge Function: LLM Proxy (beikao-app 版, 契约与教务工作台 llm-proxy 一致)
+// ================================================================
+// 目的: 把前端浏览器跨域调不通的 LLM 端点(如商汤 SenseNova、Ollama 本地等)
+//       通过 Supabase Edge Function 中转, 规避 CORS 限制。
+//
+// 部署:
+//   1. Supabase 控制台 → Edge Functions → Create Function(选「不使用编辑器模板/Deno」或用 Dashboard 内联代码),
+//      命名 llm-proxy, 粘贴本文件全部内容并 Deploy。
+//   2. 项目 Edge Function Secrets 里加一条:
+//        LLM_PROXY_TOKEN  —— 自选一个随机串(备考工作台「设置 → AI 接口」的中转 Token 填同一串)
+//   3. 回到备考工作台设置: 请求模式选「经 Supabase Edge Function 中转」,
+//      Edge Function URL 填 https://<项目名>.supabase.co/functions/v1/llm-proxy, 中转 Token 填同一串。
+//
+// 请求: POST /functions/v1/llm-proxy
+//   x-proxy-token: <LLM_PROXY_TOKEN>            ← 真正的共享密钥
+//   Authorization: Bearer <anon key>            ← 通过网关 JWT 校验(前端自动携带)
+//   body: { baseUrl, apiKey, model, messages, temperature?, maxTokens?, jsonMode? }
+//
+// 响应:
+//   { content: string }                —— 正常
+//   { error: string, status?: number } —— 上游/参数报错(始终非 200)
+// ================================================================
+
+const TOKEN = Deno.env.get("LLM_PROXY_TOKEN") ?? "";
+
+const corsHeaders: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, apikey, x-proxy-token, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Max-Age": "86400",
+};
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
+
+  // 校验共享密钥: 优先 x-proxy-token 头, 回退 Authorization(兼容旧协议, 需关闭 JWT 校验)
+  const proxyToken = (req.headers.get("x-proxy-token") ?? "").trim();
+  const auth = req.headers.get("authorization") ?? "";
+  const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
+  const provided = proxyToken || bearer;
+  if (!TOKEN || provided !== TOKEN) {
+    return json(
+      {
+        error: proxyToken
+          ? "Unauthorized: LLM_PROXY_TOKEN 不匹配, 请核对前端「中转 Token」与 Secrets 里的值"
+          : "Unauthorized: 未收到共享密钥。请部署最新版前端(经 x-proxy-token 头携带), 或关闭本函数的 JWT 校验",
+      },
+      401,
+    );
+  }
+
+  let payload: {
+    baseUrl?: string;
+    apiKey?: string;
+    model?: string;
+    messages?: Array<{ role: string; content: string }>;
+    jsonMode?: boolean;
+    temperature?: number;
+    maxTokens?: number;
+  };
+  try {
+    payload = await req.json();
+  } catch (e) {
+    return json({ error: `Invalid JSON body: ${String(e)}` }, 400);
+  }
+
+  const { baseUrl, apiKey, model, messages, jsonMode, temperature, maxTokens } = payload;
+  if (!baseUrl || !apiKey || !model || !Array.isArray(messages) || messages.length === 0) {
+    return json({ error: "Missing required field: baseUrl, apiKey, model or messages" }, 400);
+  }
+
+  // 拼装上游 URL: 兼容 baseUrl 已含 /chat/completions 的情况
+  const normalizedBase = baseUrl.replace(/\/+$/, "");
+  const upstreamUrl = normalizedBase.endsWith("/chat/completions")
+    ? normalizedBase
+    : `${normalizedBase}/chat/completions`;
+
+  const buildBody = () => {
+    const b: Record<string, unknown> = {
+      model,
+      messages,
+      temperature: typeof temperature === "number" ? temperature : 0.7,
+    };
+    if (typeof maxTokens === "number" && maxTokens > 0) b.max_tokens = Math.floor(maxTokens);
+    if (jsonMode) b.response_format = { type: "json_object" };
+    return b;
+  };
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(upstreamUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(buildBody()),
+    });
+  } catch (e) {
+    return json({ error: `Upstream network error: ${String(e)}`, upstreamUrl }, 502);
+  }
+
+  // 上游拒收 response_format(400) 时去掉该参数重试一次(部分国产服务不支持)
+  if (upstream.status === 400 && jsonMode) {
+    const retryBody = buildBody();
+    delete retryBody.response_format;
+    const retry = await fetch(upstreamUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(retryBody),
+    }).catch((e) => ({ ok: false, status: 502, text: async () => String(e) }) as unknown as Response);
+    if (retry.ok) {
+      const data = await retry.json().catch(() => null);
+      const content = extractContent(data);
+      if (content) return json({ content });
+      return json({ error: emptyContentDetail(data), status: 400 }, 400);
+    }
+  }
+
+  if (!upstream.ok) {
+    const text = await upstream.text().catch(() => "");
+    let detail = text.slice(0, 500);
+    try {
+      const j = JSON.parse(text);
+      detail = (j?.error?.message ?? j?.error ?? detail) as string;
+    } catch {
+      /* keep raw */
+    }
+    return json({ error: detail, status: upstream.status }, upstream.status);
+  }
+
+  const data = await upstream.json().catch(() => null);
+  const content = extractContent(data);
+  if (content) return json({ content });
+  return json({ error: emptyContentDetail(data), status: 400 }, 400);
+});
+
+/** 取上游正文; 兼容少数网关把 content 返回成数组的情形 */
+function extractContent(data: any): string {
+  const raw = data?.choices?.[0]?.message?.content;
+  if (typeof raw === "string" && raw.trim()) return raw;
+  if (Array.isArray(raw)) {
+    const joined = raw
+      .map((p: any) => (typeof p === "string" ? p : typeof p?.text === "string" ? p.text : ""))
+      .join("");
+    if (joined.trim()) return joined;
+  }
+  return "";
+}
+
+/** 上游 200 但正文为空时的可定位说明(推理模型把 max_tokens 花在 reasoning_content 等) */
+function emptyContentDetail(data: any): string {
+  const choice = data?.choices?.[0];
+  const finish = choice?.finish_reason;
+  const reasoning = choice?.message?.reasoning_content;
+  const parts = ["上游返回了空正文"];
+  if (finish) parts.push(`finish_reason=${finish}`);
+  if (typeof reasoning === "string" && reasoning.trim()) {
+    parts.push("模型只产出了思考内容(reasoning_content): 请提高 maxTokens 或换用非推理模型");
+  }
+  const ct = data?.usage?.completion_tokens;
+  if (typeof ct === "number") parts.push(`completion_tokens=${ct}`);
+  return parts.join(";");
+}
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
