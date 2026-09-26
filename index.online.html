@@ -3104,6 +3104,9 @@ function vSet(){
       <pre style="white-space:pre-wrap;font-size:11px;background:var(--pri-weak);padding:8px;border-radius:8px;margin-top:6px">${esc(SUPABASE_SCHEMA_SQL)}</pre></details></div>
       <div class="muted" style="margin-top:8px"><b>启用步骤</b>：①「复制建表 SQL」→ 在 Supabase SQL 编辑器执行 → ② 填 URL + anon key → ③「检查连接」确认 → ④ 设备 A 推送、设备 B 拉取(增量合并)，双向收敛互不覆盖。<br>
       同步内容：进度/错题/SRS/计划/模考/资料库/视频/<b>导入题库元数据</b>；题库本体不上传。RLS 已放行为 anon 读写（单机单用户共享 id='local' 行）。</div></div>
+  <div class="card"><h2 style="font-size:14px">🔒 应用口令门</h2>
+    <div class="muted" style="font-size:12px;margin:4px 0 8px">进站需先输口令（口令哈希存云端 beikao_state 表 id='gate' 行，明文不落盘不上云）；已验证过的设备一直免输，直到在此处被移除。需先配置好上方 Supabase 同步。</div>
+    <div id="gate-admin"></div></div>
   <div class="card"><h2 style="font-size:14px">AI 接口 (用于智能学习计划)</h2>
     <div class="row" style="margin-top:8px;flex-wrap:wrap">
       <input id="set-aiurl" placeholder="OpenAI 兼容接口, 如 https://api.deepseek.com/v1" value="${esc((ST.settings.ai||{}).url||"")}" style="flex:2;min-width:260px">
@@ -3121,6 +3124,7 @@ function vSet(){
     <button class="btn sm ghost" onclick="Settings.exportAnki()">导出Anki卡片</button>
     <button class="btn sm ghost" onclick="Settings.printWrong()">错题本PDF(打印)</button></div>
     <div class="muted" style="font-size:12px;margin-top:8px">${Settings.backupHint()}</div></div>`;
+  try{ Gate.renderAdmin(); }catch(e){}
 }
 const SUPABASE_SCHEMA_SQL=`create table if not exists beikao_state (
   id          text primary key,
@@ -3890,6 +3894,172 @@ function renderWeekly(box){
   <div class="muted" style="margin-top:4px;font-size:12.5px">${esc(r.sug[0]||"保持节奏")} <a href="#weekly" style="color:var(--pri)">查看周复盘</a></div>`;
 }
 
+/* ================= 应用口令门 (P10: 对齐环保工作台方案) =================
+   云端: beikao_state 表独立一行 id='gate', data={v,hash,devices} —
+   - hash = SHA-256(盐+口令), 明文不落盘不上云; hash='' = 口令门关闭
+   - devices = 已验证设备清单(输对口令并勾选「记住」时自动登记), 机主可移除
+   权威顺序: 云端可达以云端为准; 不可达退本地缓存(离线仍可解锁)。
+   并发: 读-改-写整体回写 + 回读校验, 最多 3 次, 防多设备互相覆盖。 */
+const Gate={
+  SALT:"beikao-gate-v1", ROW:"gate",
+  _devKey:"bk-gate.device-id", _remKey:"bk-gate.remember", _cfgKey:"bk-gate.cfg",
+  _devCache:null,
+  ls(k,v){ try{ if(v===undefined) return localStorage.getItem(k);
+    if(v===null) localStorage.removeItem(k); else localStorage.setItem(k,v); }catch(e){} return null; },
+  deviceId(){ try{ let d=localStorage.getItem(this._devKey); if(d) return d;
+      d=(typeof crypto!=="undefined"&&crypto.randomUUID)?crypto.randomUUID():"dev-"+Date.now().toString(36)+"-"+Math.random().toString(36).slice(2,10);
+      localStorage.setItem(this._devKey,d); return d; }catch(e){ return "dev-"+Date.now().toString(36); } },
+  deviceName(){ try{ const ua=navigator.userAgent;
+      const os=/Windows/i.test(ua)?"Windows":/Android/i.test(ua)?"Android":/iPhone|iPad|iPod/i.test(ua)?"iOS":/Mac OS X/i.test(ua)?"Mac":/Linux/i.test(ua)?"Linux":"OS";
+      const br=/Edg\//i.test(ua)?"Edge":/OPR\//i.test(ua)?"Opera":/Firefox\//i.test(ua)?"Firefox":/Chrome\//i.test(ua)?"Chrome":/Safari\//i.test(ua)?"Safari":"Web";
+      return os+"-"+br+"-"+this.deviceId().slice(-4); }catch(e){ return "未知设备"; } },
+  async sha(s){ if(!(typeof crypto!=="undefined"&&crypto.subtle)) throw new Error("当前环境不支持 SHA-256 (需 https 访问)");
+    const b=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(s));
+    return Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,"0")).join(""); },
+  async _sb(){ if(!ST.settings.supabaseUrl||!ST.settings.supabaseKey) throw new Error("未配置 Supabase");
+    const {createClient}=await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm");
+    return createClient(ST.settings.supabaseUrl,ST.settings.supabaseKey); },
+  _to(p,ms){ return new Promise((res,rej)=>{ const t=setTimeout(()=>rej(new Error("请求超时("+ms+"ms)")),ms);
+    Promise.resolve(p).then(v=>{clearTimeout(t);res(v);},e=>{clearTimeout(t);rej(e);}); }); },
+  async _fetchRow(tmo){ let sb; try{ sb=await this._sb(); }catch(e){ return {ok:false,row:null}; }
+    try{ const {data,error}=await this._to(sb.from("beikao_state").select("data").eq("id",this.ROW).maybeSingle(),tmo);
+      if(error) return {ok:false,row:null};
+      if(!data||!data.data) return {ok:true,row:null};
+      const v=data.data;
+      return {ok:true,row:{hash:typeof v.hash==="string"?v.hash:undefined,
+        devices:Array.isArray(v.devices)?v.devices.filter(d=>d&&typeof d.id==="string"&&typeof d.name==="string"):[]}};
+    }catch(e){ return {ok:false,row:null}; } },
+  async _mutate(mut,verify){ const sb=await this._sb(); let lastErr=null;
+    for(let i=0;i<3;i++){ try{
+      const res=await this._fetchRow(8000); if(!res.ok) throw new Error("云端不可达");
+      const next=mut(res.row);
+      const value={v:1,devices:next.devices}; if(next.hash!==undefined) value.hash=next.hash;
+      const {error}=await this._to(sb.from("beikao_state").upsert({id:this.ROW,data:value,updated_at:new Date().toISOString()}),8000);
+      if(error) throw new Error(error.message);
+      const chk=await this._fetchRow(8000);
+      if(chk.ok&&verify(chk.row)) return chk.row||next;
+      lastErr=new Error("回读校验未通过(可能被其他设备并发修改), 请重试");
+    }catch(e){ lastErr=e; } }
+    throw lastErr||new Error("操作失败"); },
+  async resolve(tmo){ tmo=tmo||5000;
+    const res=await this._fetchRow(tmo);
+    if(!res.ok){ try{ const c=JSON.parse(this.ls(this._cfgKey)||"null");
+        if(c&&typeof c.hash==="string"&&c.hash) return {enabled:true,hash:c.hash,devices:[],source:"local"}; }catch(e){}
+      return {enabled:false,hash:"",devices:[],source:"local"}; }
+    const row=res.row;
+    const enabled=!!(row&&typeof row.hash==="string"&&row.hash!=="");
+    const hash=enabled?row.hash:"";
+    try{ this.ls(this._cfgKey,JSON.stringify({hash,enabled,at:Date.now()})); }catch(e){}
+    return {enabled,hash,devices:row?row.devices:[],source:"cloud"}; },
+  remembered(hash){ return !!hash&&this.ls(this._remKey)===hash; },
+  /* 启动时调用: 云端开着门 且 本机未被记住 → 挂全屏遮挡 */
+  async start(){ try{ const cfg=await this.resolve();
+      if(!cfg.enabled||this.remembered(cfg.hash)) return;
+      this._overlay();
+    }catch(e){} },
+  _overlay(){
+    if($("#gate-overlay")) return;
+    const ov=document.createElement("div"); ov.id="gate-overlay";
+    ov.style.cssText="position:fixed;inset:0;z-index:9999;background:var(--bg,#f6f7fb);display:flex;align-items:center;justify-content:center;padding:16px";
+    ov.innerHTML=`<div class="card" style="max-width:340px;width:100%">
+      <h2 style="font-size:16px">🔒 应用口令门</h2>
+      <div class="muted" style="font-size:12.5px;margin:6px 0 10px">本应用已开启进站口令, 请输入口令继续。</div>
+      <input id="gate-pass" type="password" placeholder="口令" style="width:100%" onkeydown="if(event.key==='Enter')Gate.tryEnter()">
+      <label class="row" style="margin-top:8px;font-size:12.5px;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" id="gate-remember" checked>记住此设备 (通过后免输)</label>
+      <div class="row" style="margin-top:10px"><button class="btn" style="flex:1" onclick="Gate.tryEnter()">解锁</button></div>
+      <div class="muted" id="gate-err" style="margin-top:8px;font-size:12px;color:#c0392b;min-height:16px"></div></div>`;
+    document.body.appendChild(ov);
+    setTimeout(()=>{ const p=$("#gate-pass"); if(p) p.focus(); },60);
+  },
+  async tryEnter(){
+    const err=$("#gate-err"); const pass=((($("#gate-pass")||{}).value)||"");
+    if(!pass){ if(err) err.textContent="请输入口令"; return; }
+    if(err) err.textContent="验证中…";
+    try{
+      const cfg=await this.resolve();
+      if(!cfg.enabled){ const ov=$("#gate-overlay"); if(ov) ov.remove(); return; }
+      const h=await this.sha(this.SALT+pass);
+      if(h!==cfg.hash){ if(err) err.textContent="口令不正确"; return; }
+      if(($("#gate-remember")||{}).checked){
+        this.ls(this._remKey,cfg.hash);
+        try{ await this.register(); }catch(e){}
+      }
+      const ov=$("#gate-overlay"); if(ov) ov.remove();
+      toast("已解锁, 欢迎回来");
+    }catch(e){ if(err) err.textContent=String(e.message||e).slice(0,120); }
+  },
+  async register(){ const self={id:this.deviceId(),name:this.deviceName(),at:Date.now()};
+    const row=await this._mutate(
+      cur=>({hash:cur?cur.hash:undefined,devices:[...((cur&&cur.devices)||[]).filter(d=>d.id!==self.id),self].sort((a,b)=>b.at-a.at)}),
+      r=>!!r&&r.devices.some(d=>d.id===self.id));
+    return row.devices; },
+  async removeDevices(t){ const row=await this._mutate(
+      cur=>({hash:cur?cur.hash:undefined,devices:((cur&&cur.devices)||[]).filter(d=>t!=="all"&&!(t||[]).includes(d.id))}),
+      r=> t==="all"? (!!r&&r.devices.length===0) : (!!r&&(t||[]).every(x=>!r.devices.some(d=>d.id===x))));
+    return row.devices; },
+  async setPass(p1,p2){
+    if(!p1||p1.length<4){ toast("口令至少 4 位"); return; }
+    if(p1!==p2){ toast("两次输入不一致"); return; }
+    try{
+      const hash=await this.sha(this.SALT+p1);
+      const row=await this._mutate(cur=>({hash,devices:(cur&&cur.devices)||[]}), r=>!!r&&r.hash===hash);
+      if(row.devices.some(d=>d.id===this.deviceId())) this.ls(this._remKey,hash);
+      toast("口令已保存, 口令门已开启"); vSet();
+    }catch(e){ toast("保存失败: "+String(e.message||e).slice(0,100)); } },
+  async closeGate(){
+    if(!confirm("确定关闭口令门? 所有设备将无需口令即可进入, 设备清单一并清空。")) return;
+    try{
+      await this._mutate(()=>({hash:"",devices:[]}), r=>!!r&&r.hash===""&&(!r.devices||r.devices.length===0));
+      this.ls(this._remKey,null);
+      try{ this.ls(this._cfgKey,JSON.stringify({hash:"",enabled:false,at:Date.now()})); }catch(e){}
+      toast("口令门已关闭"); vSet();
+    }catch(e){ toast("操作失败: "+String(e.message||e).slice(0,100)); } },
+  async clearDevices(){ if(!confirm("清空全部设备? 已验证的设备下次进入需重输口令。")) return;
+    try{ await this.removeDevices("all"); toast("已清空全部设备"); vSet(); }
+    catch(e){ toast("操作失败: "+String(e.message||e).slice(0,100)); } },
+  async removeOne(id){ try{ await this.removeDevices([id]); toast("已移除该设备"); vSet(); }
+    catch(e){ toast("移除失败: "+String(e.message||e).slice(0,100)); } },
+  /* 设置页管理面板(异步读云端) */
+  async renderAdmin(){
+    const box=$("#gate-admin"); if(!box) return;
+    if(!ST.settings.supabaseUrl||!ST.settings.supabaseKey){
+      box.innerHTML='<div class="muted" style="font-size:12px">⚠ 需先在上方配置好 Supabase 同步 — 口令哈希与设备清单存于云端, 本机只存「已验证」标记。</div>'; return; }
+    box.innerHTML='<div class="muted" style="font-size:12px">读取云端配置中…</div>';
+    try{
+      const cfg=await this.resolve();
+      const me=this.deviceId();
+      const fmt=d=>{ try{ return new Date(d).toLocaleString("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}); }catch(e){ return ""; } };
+      if(!cfg.enabled){
+        box.innerHTML=`<div class="row" style="font-size:12.5px;margin-bottom:8px">状态：<span class="tag">未开启</span> · 本机：${esc(this.deviceName())}${cfg.source==="local"&&ST.settings.supabaseUrl?' <span class="muted">(云端暂不可达)</span>':""}</div>
+        <div class="row" style="flex-wrap:wrap">
+          <input id="gate-new1" type="password" placeholder="新口令 (至少4位)" style="width:170px">
+          <input id="gate-new2" type="password" placeholder="再输一遍" style="width:150px">
+          <button class="btn sm" onclick="Gate.setPass($('#gate-new1').value,$('#gate-new2').value)">开启口令门</button></div>
+        <div class="muted" style="font-size:11.5px;margin-top:6px">开启后进站需输口令; 输对并勾选「记住此设备」的设备会登记在清单中, 一直免输直到被移除。</div>`;
+        return; }
+      const devs=(this._devCache!=null?this._devCache:cfg.devices)||[];
+      box.innerHTML=`<div class="row" style="font-size:12.5px;margin-bottom:8px">状态：<span class="tag ok">已开启</span> · 本机：${esc(this.deviceName())}${cfg.source==="local"?' <span class="muted">(云端暂不可达, 用本地缓存)</span>':""}</div>
+      <div class="row" style="flex-wrap:wrap;margin-bottom:10px">
+        <input id="gate-new1" type="password" placeholder="新口令 (至少4位)" style="width:150px">
+        <input id="gate-new2" type="password" placeholder="再输一遍" style="width:140px">
+        <button class="btn sm" onclick="Gate.setPass($('#gate-new1').value,$('#gate-new2').value)">修改口令</button>
+        <button class="btn sm bad" onclick="Gate.closeGate()">关闭口令门</button></div>
+      <div style="font-size:12.5px;font-weight:600;margin-bottom:4px">已验证设备（${devs.length}）</div>
+      ${devs.map(d=>`<div class="row" style="margin:3px 0;font-size:12.5px">
+        <span style="flex:1">${esc(d.name||d.id)}${d.id===me?' <span class="tag ok" style="font-size:10px">本机</span>':""}</span>
+        <span class="muted" style="font-size:11px">${d.at?fmt(d.at):""}</span>
+        <button class="btn sm ghost" onclick="Gate.removeOne('${String(d.id).replace(/[^a-zA-Z0-9-]/g,"")}')">移除</button></div>`).join("")
+        ||'<div class="muted" style="font-size:12px">（暂无登记设备 — 可能在开启前就已勾选记住, 重新输一次口令即可登记）</div>'}
+      <div class="row" style="margin-top:8px">
+        <button class="btn sm bad" onclick="Gate.clearDevices()">清空全部设备</button>
+        <button class="btn sm ghost" onclick="Gate._devCache=null;Gate.renderAdmin()">刷新</button></div>
+      <div class="muted" style="font-size:11.5px;margin-top:8px">修改口令后已验证设备仍免输; 若想让所有设备重新验证, 改完口令再点「清空全部设备」。<br>忘记口令的自救: Supabase Dashboard → SQL Editor 执行 <code>delete from beikao_state where id='gate';</code></div>`;
+    }catch(e){
+      box.innerHTML='<div class="muted" style="font-size:12px">读取失败: '+esc(String(e.message||e).slice(0,100))+"。离线时无法管理口令门, 联网后重试。</div>";
+    }
+  }
+};
+
 /* ================= 启动 ================= */
 (async function(){
   await Store.init();
@@ -3898,6 +4068,7 @@ function renderWeekly(box){
   try{ Plan.migrateSubj(); Plan.ensureTasks(); }catch(e){}
   try{ Lib.migrateVidSubj(); }catch(e){}
   route();
+  Gate.start();   /* 口令门: 云端已开启且本机未记住时, 挂全屏解锁遮挡 */
   /* PWA: 注册 Service Worker (网络优先, 只做离线兜底, 不会缓存旧版页面);
      本地 file:// 打开或浏览器不支持时静默跳过 */
   if("serviceWorker" in navigator && location.protocol!=="file:"){
