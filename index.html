@@ -1984,7 +1984,7 @@ function renderPlanMini(box){
   ${p.sprint?'<div class="tag warn" style="margin-top:8px">冲刺模式: 距考试 ≤14 天, 只刷模考+错题+到期卡</div>':""}
   ${p.holiday?`<div class="tag" style="margin-top:6px;background:rgba(155,89,182,.15);color:#8e44ad">假期模式: ${esc(p.holiday.start)}~${esc(p.holiday.end)} 强度降至 ${Math.round((p.holiday.intensity||0.4)*100)}%</div>`:""}
   ${p.factor!==1?`<div class="muted" style="margin-top:6px">自动调节: 近3天完成率${p.factor>1?"高, 配额已上浮 20%":"偏低, 配额已下调 20%"}</div>`:""}
-  ${(ST.plan&&ST.plan.generatedAt)?`<div class="muted" style="margin-top:6px;font-size:11.5px">生效计划来源: <b>${esc(ST.plan.source||"确定性引擎")}</b> · 生成于 ${esc(ST.plan.generatedAt)} · 每日任务与月周天结构均以该计划为准${ST.aiPlan&&ST.aiPlan.md?" (AI 计划仅作指导文档, 见下方⑥)":""}</div>`:""}`;
+  ${(ST.plan&&ST.plan.generatedAt)?`<div class="muted" style="margin-top:6px;font-size:11.5px">生效计划来源: <b>${esc(ST.plan.source||"确定性引擎")}</b> · 生成于 ${esc(ST.plan.generatedAt)} · 每日任务与月周天结构均以该计划为准${ST.plan.engine==="ai-alloc"?" (AI 排程驱动)":""}</div>`:""}`;
 }
 function vPlan(){
   const s=ST.settings;
@@ -2068,9 +2068,9 @@ function vPlan(){
   <details class="card"><summary style="cursor:pointer;list-style:none"><h2 style="font-size:14px;display:inline">进度校准 <span class="muted" style="font-size:11px">(保大调小: 优先动天级任务赶月度目标 · 点击展开)</span></h2></summary>
     <div id="calib-out" style="margin-top:8px"></div></details>
 
-  <details class="card" open><summary style="cursor:pointer;list-style:none"><h2 style="font-size:14px;display:inline">确定性规划 <span class="muted" style="font-size:11px">(离线可用 · 不依赖 AI)</span></h2></summary>
+  <details class="card"${ST.plan&&ST.plan.engine==="ai-alloc"?"":" open"}><summary style="cursor:pointer;list-style:none"><h2 style="font-size:14px;display:inline">确定性规划 <span class="muted" style="font-size:11px">(已由 AI 智能规划替代 · 仅作离线兜底 · 点击展开)</span></h2></summary>
     ${(()=>{ const p=ST.plan;
-      if(!p||!p.generatedAt) return '<div class="muted" style="margin-top:6px;font-size:12px">尚未生成计划。生成后这里显示生效来源与时间。</div>';
+      if(!p||!p.generatedAt) return '<div class="muted" style="margin-top:6px;font-size:12px">尚未生成计划。建议用上方「AI 分析并排程」生成; 无 AI 时可在此离线兜底。</div>';
       const cs=p.courseStat||{}; const tn=Object.values(cs).reduce((a,c)=>a+(c.n||0),0);
       const nTasks=Object.keys(ST.taskDays||{}).length;
       return `<div class="row" style="margin-top:6px;flex-wrap:wrap;gap:8px">
@@ -2079,13 +2079,14 @@ function vPlan(){
         <span class="tag">月${(p.months||[]).length}个 · 周${(p.months||[]).reduce((a,m)=>a+(m.weeks||[]).length,0)}个</span>
         <span class="tag">已排 ${tn} 讲课程</span>
         <span class="tag">每日任务已落位 ${nTasks} 天</span></div>
-      <div class="muted" style="margin-top:6px;font-size:11.5px">每日任务、月/周/天结构与进度校准一律以本计划为准${ST.aiPlan&&ST.aiPlan.md?"；下方 AI 计划作为策略指导文档, 不驱动任务。":""}。改动上述配置后请重新生成。</div>`; })()}
+      <div class="muted" style="margin-top:6px;font-size:11.5px">每日任务、月/周/天结构与进度校准一律以本计划为准。改动上述配置后请重新生成。</div>`; })()}
     <div class="row" style="margin-top:8px;flex-wrap:wrap">
       <label>周末强度系数</label><input type="number" id="plan-wk" step="0.1" value="${s.weekendFactor||1.5}" style="width:60px"><label>×</label>
       <label>番茄钟</label><input type="number" id="plan-pomo" value="${s.pomo||25}" style="width:60px"><label>分钟</label>
-      <button class="btn" onclick="Plan.gen()">生成确定性计划</button>
+      <button class="btn ghost" onclick="Plan.gen()">⚙️ 离线兜底生成(不依赖 AI)</button>
       <button class="btn ghost" onclick="Plan.pomoStart()">🍅 开始专注</button>
       ${ST.plan&&ST.plan.generatedAt?`<button class="btn sm ghost" onclick="Plan.ensureTasks(true);toast('未来30天每日任务已按当前计划重算');renderPlanMini($('#plan-today'))">重算每日任务</button>`:""}</div>
+    <div class="muted" style="margin-top:6px;font-size:11.5px;color:#8e7cc3">Ⓛ 此卡片的确定性引擎已隔离: 只作 AI 不可用时的离线兜底, 生成的计划来源会标注「确定性引擎」; 日常请用上方 AI 排程。</div>
     <div id="pomo-box" class="muted" style="margin-top:6px"></div>
     <div id="det-plan-out"></div></details>
 
@@ -2398,23 +2399,33 @@ gen(aiAlloc){
     return out;
   };
   const subj=this.subjects().filter(x=>x.mode!=="skip");
-  /* ---- P7: AI 排程分配(可选): order=主攻顺序, months[ym].focus=每月科目时间占比, mode=单科推进/混配 ---- */
+  /* ---- P7: AI 排程分配: order=主攻顺序, months[].focus=每月科目时间占比, mode=单科推进/混配
+     宽容解析: AI 返回科目名称/格式略有出入也能映射(id→title 模糊匹配, ym 对不上按索引对齐);
+     只要传了 alloc(AI 排程按钮) AI 分配就生效, 不再静默退回确定性引擎 ---- */
   let aiInfo=null;
   {
     const allIds=subj.map(x=>x.id);
-    const ord=(aiAlloc&&Array.isArray(aiAlloc.order)?aiAlloc.order:[]).filter(id=>allIds.includes(id));
+    const norm=s=>String(s==null?"":s).trim();
+    const byIdOrName=v=>{ v=norm(v); if(!v) return null;
+      const s1=subj.find(x=>x.id===v); if(s1) return s1.id;
+      const s2=subj.find(x=>norm(x.title)===v); if(s2) return s2.id;
+      const s3=subj.find(x=>norm(x.title)&&(v.includes(norm(x.title))||norm(x.title).includes(v))); return s3?s3.id:null; };
+    const ord=(aiAlloc&&Array.isArray(aiAlloc.order)?aiAlloc.order:[]).map(byIdOrName).filter(Boolean)
+      .filter((id,i,a)=>a.indexOf(id)===i);
     allIds.forEach(id=>{ if(!ord.includes(id)) ord.push(id); });
-    const focus={};
-    (aiAlloc&&Array.isArray(aiAlloc.months)?aiAlloc.months:[]).forEach(m=>{
-      if(!m||!m.ym) return;
-      const f=(Array.isArray(m.focus)?m.focus:[]).filter(x=>x&&allIds.includes(x.id)&&+x.pct>0)
-        .map(x=>({id:x.id,pct:+x.pct||0}));
+    const focusArr=(aiAlloc&&Array.isArray(aiAlloc.months)?aiAlloc.months:[]).map(m=>{
+      if(!m) return null;
+      const ym=norm(m.ym).slice(0,7);
+      const f=(Array.isArray(m.focus)?m.focus:[]).map(x=>{
+        if(!x) return null;
+        const id=byIdOrName(typeof x==="string"?x:(x.id||x.name));
+        return id?{id,pct:Math.max(1,+((x.pct!=null?x.pct:x.weight))||0)}:null;
+      }).filter(Boolean);
       const tot=f.reduce((a,x)=>a+x.pct,0);
-      if(f.length) focus[m.ym]=f.map(x=>({id:x.id,pct:Math.round(x.pct/(tot||1)*100)}));
-    });
-    if(aiAlloc&&(ord.length<allIds.length||Object.keys(focus).length))
-      aiInfo={mode:aiAlloc.mode==="sequential"?"sequential":"mixed",order:ord,focus,
-        notes:String(aiAlloc.notes||"").slice(0,400)};
+      return f.length?{ym,list:f.map(x=>({id:x.id,pct:Math.round(x.pct/(tot||1)*100)}))}:null;
+    }).filter(Boolean);
+    if(aiAlloc) aiInfo={mode:aiAlloc.mode==="sequential"?"sequential":"mixed",order:ord,focusArr,
+      notes:String(aiAlloc.notes||"").slice(0,400)};
   }
   const order=aiInfo
     ? subj.slice().sort((a,b)=>aiInfo.order.indexOf(a.id)-aiInfo.order.indexOf(b.id))
@@ -2467,11 +2478,13 @@ gen(aiAlloc){
     if(!m){ m=byYm[ym]={ym,phase:ph,start:fmtD(d),end:fmtD(d),ds:[],brushGoal:0,subjects:[],weeks:[]}; months.push(m); }
     m.end=fmtD(d); m.phase=ph; m.ds.push(d);
   });
-  months.forEach(m=>{
+  months.forEach((m,mi)=>{
     m.brushGoal=m.ds.reduce((a,d)=>a+dayTargetFor(fmtD(d)).brush,0);
-    /* 月主攻: AI 分配了该月占比则按占比(含 pct), 否则按权重前5 */
-    m.subjects=(aiInfo&&aiInfo.focus[m.ym])
-      ? aiInfo.focus[m.ym].map(f=>{ const x=subj.find(s2=>s2.id===f.id)||{};
+    /* 月主攻: AI 分配了该月占比则按占比(ym 精确匹配优先, 对不上按索引对齐), 否则按权重前5 */
+    const fl=aiInfo&&aiInfo.focusArr.length
+      ?(aiInfo.focusArr.find(f=>f.ym===m.ym)||aiInfo.focusArr[Math.min(mi,aiInfo.focusArr.length-1)]):null;
+    m.subjects=fl
+      ?fl.list.map(f=>{ const x=subj.find(s2=>s2.id===f.id)||{};
           return {id:f.id,title:x.title||f.id,weight:x.weight,cat:x.cat,pct:f.pct}; })
       : order.slice(0,5).map(x=>({id:x.id,title:x.title,weight:x.weight,cat:x.cat}));
     const ws=[]; let seg=[];
@@ -2506,7 +2519,10 @@ gen(aiAlloc){
     brushW,brushE,newW,newE,catRouting:{calc:"工作日主攻",mem:"周末背诵",mix:"工作日原理+周末综合"},
     phases,subjectPlan,mockDays,weekdayTemplate,weekendTemplate,months,courseStat,adj};
   Store.save("plan"); this.ensureTasks(true); this.renderDet();
-  toast("确定性计划已生成 (阶段→月→周→天, 已含跟课排程并写入未来30天每日任务)");
+  try{ renderPlanMini($("#plan-today")); }catch(e){}
+  toast(aiInfo
+    ?("AI 智能排程已生效 ("+(aiInfo.mode==="sequential"?"单科推进":"科目混配")+"), 月/周/天与未来30天每日任务已落位")
+    :"确定性兜底计划已生成 (阶段→月→周→天, 已含跟课排程并写入未来30天每日任务)");
 },
 /* ---- P6: 把各科未看完的视频排入周计划。可重复调用(增删视频后重排) ---- */
 scheduleCourses(months){
@@ -2812,8 +2828,10 @@ ${load.map(l=>`${l.id}|${l.title}|${l.cat}|${l.weight}|${l.kps}|${l.lessonLeft}/
     const alloc=JSON.parse(m[0]);
     if(alloc.mode!=="sequential"&&alloc.mode!=="mixed") alloc.mode=mode;
     this.gen(alloc);
+    const realSrc=(ST.plan&&ST.plan.source)||"";
     const nm=id=>{ const sj=this.syllabus().find(x=>x.id===id); return sj?sj.title:id; };
-    if(out) out.innerHTML=`<div class="muted" style="margin-top:8px">✅ AI 排程已生效并写入每日任务: <b>${esc(alloc.mode==="sequential"?"单科推进(过关再下一科)":"科目混配(多科穿插)")}</b></div>
+    if(!/AI/.test(realSrc)) throw new Error("AI 分配结果未能生效(计划仍为确定性引擎), 请重试或检查科目配置");
+    if(out) out.innerHTML=`<div class="muted" style="margin-top:8px">✅ AI 排程已生效并写入每日任务: <b>${esc(alloc.mode==="sequential"?"单科推进(过关再下一科)":"科目混配(多科穿插)")}</b> · 生效来源: ${esc(realSrc)}</div>
       <div class="muted" style="margin-top:4px;font-size:12px">顺序: ${esc((alloc.order||[]).slice(0,8).map(nm).join(" → "))}${(alloc.order||[]).length>8?" …":""}</div>
       ${alloc.notes?`<div class="muted" style="margin-top:4px;font-size:12px">AI 说明: ${esc(alloc.notes)}</div>`:""}`;
     toast("AI 智能排程已生成: 月/周/天任务已按 "+(alloc.mode==="sequential"?"单科推进":"科目混配")+"落位");
