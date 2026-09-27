@@ -1259,7 +1259,11 @@ function allCards(){
           const anchor=kpAnchorLine(pt);
           const ex=(String(pt).match(/例[：:]\s*([^。；;]{4,40})/)||[])[1]||"";
           const bodyClean=String(pt).replace(/\$[^$]*\$/g," ").replace(_KP_HEAD_STRIP,"").replace(/\s+/g," ").trim();
-          back=[name?name+"：":"", fm.join("  "), anchor?("推导/记忆锚点: "+anchor):"", ex?("示例: "+ex):""].filter(Boolean).join("<br>")||bodyClean||pt;
+          /* P18c: 公式类点若既无 $LaTeX$ 也无 = 方程结构(仅靠"方程/定理"等关键词命中 formula), 结构化背面只剩「名称：」光杆标题 → 回退为整段正文作答案 */
+          const hasFx=fmAll.length>0||/[=＝]/.test(String(pt).replace(/\$[^$]*\$/g," "));
+          back=hasFx
+            ?([name?name+"：":"", fm.join("  "), anchor?("推导/记忆锚点: "+anchor):"", ex?("示例: "+ex):""].filter(Boolean).join("<br>")||bodyClean||pt)
+            :(bodyClean||pt);
           cCards.push({id,type:"kp",klass:"formula",front,back,kpId:kp.id,ch:kp.chapterId});
           // 推导子卡: 把「注」里的关键一步单独拆出, 避免跳过理解死记
           if(anchor&&anchor.length>6&&anchor.length<60)
