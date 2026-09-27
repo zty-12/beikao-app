@@ -2272,8 +2272,15 @@ async function aiChat(prompt,opts){
       if(j2&&typeof j2.content==="string") content=j2.content;
       else if(j2&&j2.choices&&j2.choices[0]&&j2.choices[0].message) content=String(j2.choices[0].message.content||"");
       if(!content){
-        const snip=String((j2&&j2.error)||"").slice(0,180);
-        throw new Error("中转返回空内容"+(snip?("("+snip+")"):"")+"。常见原因: llm-proxy 是旧版(请重新部署)、上游模型把 max_tokens 花在了思考内容上");
+        /* 推理模型兜底: 部分网关把正文放进 reasoning_content 而留空 content */
+        const m0=(j2&&j2.choices&&j2.choices[0]&&j2.choices[0].message)||{};
+        const rs=typeof m0.reasoning_content==="string"?m0.reasoning_content.trim():"";
+        if(rs){ content=rs; }
+        else{
+          /* 把上游原始响应带出来, 一眼定位: 模型名错/无权限(错误装进200) / 非JSON体 */
+          const snip=j2?JSON.stringify(j2).slice(0,240):"响应体不是有效 JSON";
+          throw new Error("中转返回空内容, 上游原始响应: "+snip+"。常见原因: ① 模型名不存在或 Key 无该模型权限(网关把错误包在 HTTP 200 里); ② 上游接口路径不对(检查 Base URL 是否为 OpenAI 兼容 /v1); ③ 推理模型把 max_tokens 花在思考上");
+        }
       }
       return {choices:[{message:{content}}]};   // 统一形状, 复用 aiTxt
     }
