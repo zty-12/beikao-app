@@ -2212,7 +2212,8 @@ function vidPct(v){ if(!v) return 0; if(!v.dur) return v.pos>0?1:0; return Math.
 async function aiChat(prompt,opts){
   opts=opts||{};
   const cfg=ST.settings.ai||{};
-  if(!cfg.url||!cfg.key) throw new Error("请先到 设置 → AI 接口 填写接口地址与密钥");
+  /* 直连模式允许 Key 为空(本地 Ollama / LM Studio 等无需鉴权); 中转/云接口仍要求 Key */
+  if(!cfg.url||(!cfg.key&&cfg.mode!=="direct")) throw new Error("请先到 设置 → AI 接口 填写接口地址与密钥");
   let u=String(cfg.url||"").trim();
   if(!/^https?:\/\//i.test(u)) u="https://"+u;               // 漏写协议时按 https 处理
   u=u.replace(/\/+$/,"");
@@ -2267,7 +2268,9 @@ async function aiChat(prompt,opts){
         throw new Error("中转错误 HTTP "+r.status+": "+d);
       }
       const j2=await r.json().catch(()=>null);
-      const content=j2&&typeof j2.content==="string"?j2.content:"";
+      let content="";
+      if(j2&&typeof j2.content==="string") content=j2.content;
+      else if(j2&&j2.choices&&j2.choices[0]&&j2.choices[0].message) content=String(j2.choices[0].message.content||"");
       if(!content){
         const snip=String((j2&&j2.error)||"").slice(0,180);
         throw new Error("中转返回空内容"+(snip?("("+snip+")"):"")+"。常见原因: llm-proxy 是旧版(请重新部署)、上游模型把 max_tokens 花在了思考内容上");
@@ -2278,7 +2281,9 @@ async function aiChat(prompt,opts){
       const body={model:cfg.model||"deepseek-chat",messages:[{role:"user",content:prompt}],
         temperature:opts.temperature==null?0.3:opts.temperature};
       if(opts.max_tokens) body.max_tokens=opts.max_tokens;
-      r=await fetch(u,{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+cfg.key},
+      const hd={"Content-Type":"application/json"};
+      if(cfg.key) hd.Authorization="Bearer "+cfg.key;   // 本地模型(Ollama/LM Studio)通常无需鉴权, 留空即可
+      r=await fetch(u,{method:"POST",headers:hd,
         body:JSON.stringify(body),
         signal:ctrl?ctrl.signal:undefined});
     }catch(ne){
@@ -2992,7 +2997,7 @@ async aiSched(){
       &&(x.chapters||[]).some(c=>k.chapterId===c||k.chapterId.startsWith(c+"-")));
     return x.title+": "+ks.slice(0,40).map(k=>String(k.title).trim()).join(" | ");
   }).join("\n").slice(0,14000);
-  const prompt=`你是备考排程引擎。请根据以下数据, 把未来 ${monthsN} 个月的复习时间分配到各科目, 并给出逐周详细安排, 输出严格 JSON。
+  const schedPrompt=(a,b)=>`你是备考排程引擎。请根据以下数据, 把未来 ${monthsN} 个月的复习时间分配到各科目, 并给出逐周详细安排, 输出严格 JSON。
 【用户约束】考试: ${ST.settings.examName||""}；日期: ${ST.settings.examDate||"未设置"}；工作日 ${+ST.settings.weekdayMin||90}分钟/天, 周末 ${+ST.settings.weekendMin||240}分钟/天 × 周末强度系数${wkF}；番茄钟 ${pomoM}分钟/个；目标分 ${ST.settings.targetScore||132}。
 【时间预算(必须作为约束)】听课占比: 基础期 ${lrB.base}%、强化期 ${lrB.mid}%、冲刺期 ${lrB.sprint}% 的时长先用于看视频课(跟课), 其余时间刷题/背诵 —— 各科"课程剩余估时"要优先用听课时间消化, 课程没排完的科目应获得足够月份。每月可用时长见下方, 分配的时间占比之和不能超过该月可用时长。
 【各月可用时间】${monthMin}
@@ -3011,19 +3016,33 @@ ${menu}
 4. 课程估时大的科目要给足月份; 正确率低的科目适当多配; 记忆型(mem)科目靠近考试月份占比应提高; 时间分配须满足【时间预算】(听课占比/各月可用时长)。工作日安排理解计算型, 周末安排记忆背诵型。
 5. strategy.reviewNodes 固定 [1,2,4,7,15,30] (艾宾浩斯复习节点, 天数)。
 6. notes: 一两句话说明分配理由。
+【分批发片】本次只生成 weeks 中 n ∈ [${a}, ${b}] 的条目; order / months / strategy 仍完整输出一份(各批保持一致, 便于合并)。
 只输出 JSON 本体, 不要代码块、不要解释。格式:
 {"mode":"${mode}","order":["科目id",...],"months":[{"ym":"${yms[0]||"2026-10"}","focus":[{"id":"科目id","pct":60},...]},...],"weeks":[{"n":1,"wd":{"id":"科目id","ch":["知识点关键词","..."]},"we":{"id":"科目id","ch":["..."]},"review":"复习第1周内容(D+7)","goal":"完成xx知识点"},...],"strategy":{"reviewNodes":[1,2,4,7,15,30]},"notes":"..."}`;
-  const out=$("#ai-plan-out"); if(out) out.innerHTML='<div class="muted">🤖 AI 正在分析各科知识点数量 / 课程剩余时长 / 难易度, 并分配每月任务…(本地模型约 1~3 分钟, 请勿关闭页面)</div>';
+  const out=$("#ai-plan-out");
   try{
-    const txt=aiTxt(await aiChat(prompt,{temperature:0.2,timeout:600000})).replace(/^```(json)?\s*/i,"").replace(/```\s*$/,"").trim();
-    const m=txt.match(/\{[\s\S]*\}/); if(!m) throw new Error("未解析到 JSON 分配结果");
-    const alloc=JSON.parse(m[0]);
+    /* 分 3 批生成(每批 4 周), 降低单请求体积 → 规避中转 546 资源限制 & 提升本地模型稳定性 */
+    const B=4, parts=[];
+    for(let s=1;s<=12;s+=B){
+      const e=Math.min(12,s+B-1);
+      if(out) out.innerHTML='<div class="muted">🤖 AI 正在生成第 '+s+'~'+e+' 周计划 ('+parts.length+'/3 批已完成)…</div>';
+      const txt=aiTxt(await aiChat(schedPrompt(s,e),{temperature:0.2,timeout:600000})).replace(/^```(json)?\s*/i,"").replace(/```\s*$/,"").trim();
+      const m=txt.match(/\{[\s\S]*\}/); if(!m) throw new Error("未解析到 JSON(第 "+s+"~"+e+" 周批次)");
+      parts.push(JSON.parse(m[0]));
+    }
+    const order=parts[0].order||[];
+    const months=parts[0].months||[];
+    const strategy=parts[0].strategy||{reviewNodes:[1,2,4,7,15,30]};
+    const seen={}; let weeks=[];
+    parts.forEach(p=>{(p.weeks||[]).forEach(w=>{ if(w&&w.n!=null&&!seen[w.n]){ seen[w.n]=1; weeks.push(w); } });});
+    weeks.sort((x,y)=>(x.n||0)-(y.n||0));
+    const alloc={mode:parts[0].mode||mode, order, months, weeks, strategy, notes:parts[0].notes||""};
     if(alloc.mode!=="sequential"&&alloc.mode!=="mixed") alloc.mode=mode;
     this.gen(alloc);
     const realSrc=(ST.plan&&ST.plan.source)||"";
     const nm=id=>{ const sj=this.syllabus().find(x=>x.id===id); return sj?sj.title:id; };
     if(!/AI/.test(realSrc)) throw new Error("AI 分配结果未能生效(计划仍为确定性引擎), 请重试或检查科目配置");
-    if(out) out.innerHTML=`<div class="muted" style="margin-top:8px">✅ AI 排程已生效并写入每日任务: <b>${esc(alloc.mode==="sequential"?"单科推进(过关再下一科)":"科目混配(多科穿插)")}</b> · 生效来源: ${esc(realSrc)}</div>
+    if(out) out.innerHTML=`<div class="muted" style="margin-top:8px">✅ AI 排程已生效并写入每日任务: <b>${esc(alloc.mode==="sequential"?"单科推进(过关再下一科)":"科目混配(多科穿插)")}</b> · 生效来源: ${esc(realSrc)} · 共 ${weeks.length} 周</div>
       <div class="muted" style="margin-top:4px;font-size:12px">顺序: ${esc((alloc.order||[]).slice(0,8).map(nm).join(" → "))}${(alloc.order||[]).length>8?" …":""}</div>
       ${alloc.notes?`<div class="muted" style="margin-top:4px;font-size:12px">AI 说明: ${esc(alloc.notes)}</div>`:""}`;
     toast("AI 智能排程已生成: 月/周/天任务已按 "+(alloc.mode==="sequential"?"单科推进":"科目混配")+"落位");
@@ -3536,7 +3555,8 @@ function vSet(){
       <b>首次部署</b>: ① Supabase 控制台 → Edge Functions → New Function 命名 <code>llm-proxy</code> → 点「📋 复制函数源码」粘贴部署; ② 项目 Secrets 加 <code>LLM_PROXY_TOKEN</code>(自选随机串, 与上面中转 Token 填一致); ③ Edge Function URL 填 <code>https://&lt;项目名&gt;.supabase.co/functions/v1/llm-proxy</code>。若上方 Supabase 同步已配置, 网关 JWT 校验会自动复用其 anon key。<br>
       提示 401: 确认中转 Token 与 Secrets 一致, 或函数设置里关闭「Enforce JWT verification」。<br>
       <b>跨项目复用</b> (如借用教务工作台的 llm-proxy): 函数 URL 填对方地址后, 还须在「中转项目 anon key」填<b>对方项目</b>的 anon key (对方 Supabase 控制台 → Settings → API), 否则网关 JWT 校验会报 UNAUTHORIZED_LEGACY_JWT; 且中转 Token 须与对方项目 Secrets 里的 LLM_PROXY_TOKEN 一致。</div></div>
-    <div class="muted" style="margin-top:8px">支持任何 OpenAI 兼容接口 (DeepSeek / 硅基流动 / Kimi / 商汤等); Key 仅保存在本地浏览器, 不随同步上传。直连模式若提示跨域(CORS)失败, 改用上方「经 Edge Function 中转」即可; HTTPS 页面填 http:// 公网地址会自动升级为 https。</div></div>
+    <div class="muted" style="margin-top:8px">支持任何 OpenAI 兼容接口 (DeepSeek / 硅基流动 / Kimi / 商汤 / <b>Ollama 本地</b> 等); Key 仅保存在本地浏览器, 不随同步上传。直连模式若提示跨域(CORS)失败, 改用上方「经 Edge Function 中转」即可; HTTPS 页面填 http:// 公网地址会自动升级为 https。<br>
+    <b>用本地模型(Ollama/LM Studio)</b>: 点「Ollama 本地」预设自动填好 <code>http://localhost:11434/v1</code>, Key 留空即可; 因 HTTPS 页面会拦截对本地 http 服务的请求, <b>请下载 <code>index.standalone.html</code> 离线单文件双击打开</b>(file:// 协议)再选直连模式, 否则本地地址无法联通。本地模型(尤其 7B)生成逐周排程这种长输出较慢, 属正常。</div></div>
   <div class="card"><h2 style="font-size:14px">数据管理</h2><div class="row" style="margin-top:8px;flex-wrap:wrap">
     <button class="btn sm ghost" onclick="Settings.exportAll(0)">导出进度 (JSON)</button>
     <button class="btn sm ghost" onclick="Settings.exportAll(1)">导出完整备份（进度 + 导入题库）</button>
@@ -3561,7 +3581,8 @@ const AI_PROVIDERS={
   "DeepSeek":["https://api.deepseek.com/v1","deepseek-chat"],
   "通义千问":["https://dashscope.aliyuncs.com/compatible-mode/v1","qwen-plus"],
   "Kimi":["https://api.moonshot.cn/v1","moonshot-v1-8k"],
-  "智谱GLM":["https://open.bigmodel.cn/api/paas/v4","glm-4-flash"]
+  "智谱GLM":["https://open.bigmodel.cn/api/paas/v4","glm-4-flash"],
+  "Ollama 本地":["http://localhost:11434/v1","qwen2.5:7b"]
 };
 const Settings={
   /* AI 连通性自检: 保存配置后发一个最小请求, 把具体失败原因(而不是笼统报错)告诉用户 */
