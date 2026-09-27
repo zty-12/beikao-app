@@ -3552,7 +3552,7 @@ function vSet(){
         <input id="set-aiproxyanon" placeholder="中转项目 anon key (跨项目时填, 留空=用同步项目的)" value="${esc((ST.settings.ai||{}).proxyAnon||"")}" style="flex:1;min-width:220px">
         <button class="btn sm ghost" onclick="Settings.copyProxyFn()">📋 复制函数源码</button></div>
       <div class="muted" style="margin-top:8px;font-size:11px;line-height:1.7">跨域(CORS)被服务商拒绝时选中转: 浏览器只请求 Supabase, 由 Edge Function 服务端转发到真实 LLM。上游 baseUrl/apiKey 放请求体里经服务端读取, 前端共享密钥经 <code>x-proxy-token</code> 头携带。<br>
-      <b>首次部署</b>: ① Supabase 控制台 → Edge Functions → New Function 命名 <code>llm-proxy</code> → 点「📋 复制函数源码」粘贴部署; ② 项目 Secrets 加 <code>LLM_PROXY_TOKEN</code>(自选随机串, 与上面中转 Token 填一致); ③ Edge Function URL 填 <code>https://&lt;项目名&gt;.supabase.co/functions/v1/llm-proxy</code>。若上方 Supabase 同步已配置, 网关 JWT 校验会自动复用其 anon key。<br>
+      <b>推荐路径 (中转与「Supabase 同步」同属一个项目时, 最省事)</b>: 把本函数部署到上方「Supabase 同步」所填的那个项目 (如 <code>sbp_…</code> 项目) —— ① 点「📋 复制函数源码」; ② 进该项目控制台 → Edge Functions → New Function 命名 <code>llm-proxy</code> → 粘贴部署; ③ 项目 Secrets 加 <code>LLM_PROXY_TOKEN</code>(自选随机串); ④ 回此页只填「中转 Token」= 同一串。此时 <b>Edge Function URL 与 anon key 会自动派生, 无需手填, 也不会再出现跨项目 401</b>。<br>
       提示 401: 确认中转 Token 与 Secrets 一致, 或函数设置里关闭「Enforce JWT verification」。<br>
       <b>跨项目复用</b> (如借用教务工作台的 llm-proxy): 函数 URL 填对方地址后, 还须在「中转项目 anon key」填<b>对方项目</b>的 anon key (对方 Supabase 控制台 → Settings → API), 否则网关 JWT 校验会报 UNAUTHORIZED_LEGACY_JWT; 且中转 Token 须与对方项目 Secrets 里的 LLM_PROXY_TOKEN 一致。</div></div>
     <div class="muted" style="margin-top:8px">支持任何 OpenAI 兼容接口 (DeepSeek / 硅基流动 / Kimi / 商汤 / <b>Ollama 本地</b> 等); Key 仅保存在本地浏览器, 不随同步上传。直连模式若提示跨域(CORS)失败, 改用上方「经 Edge Function 中转」即可; HTTPS 页面填 http:// 公网地址会自动升级为 https。<br>
