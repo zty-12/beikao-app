@@ -685,7 +685,7 @@ function vExam(){
       <span class="muted" style="font-size:11.5px">· 真实卷 = 公共基础120题×1分 + 专业基础60题×2分, 题库未覆盖的科目自动跳过</span>
     </div>
     <div id="parts-import-box" style="display:none;margin-top:8px;border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:8px">
-      <textarea id="parts-import" rows="5" placeholder="每行: 科目名 题量 [每题分]，如:&#10;数学基础 12 1&#10;污染防治技术 22 2" style="width:100%"></textarea>
+      <textarea id="parts-import" rows="5" placeholder="每行: 科目名 题量 [每题分]，如:&#10;高等数学 12 1&#10;污染防治技术 22 2" style="width:100%"></textarea>
       <div class="row" style="margin-top:6px"><button class="btn sm" onclick="Exam.importParts()">解析导入</button>
         <span class="muted" style="font-size:11.5px">科目名与考纲匹配则按考纲章节抽题, 否则该段全局抽题。</span></div>
     </div><div id="custom-form"></div>
@@ -1488,7 +1488,8 @@ function vTree(){
   <div class="card"><div class="row" style="flex-wrap:wrap">
     <input id="tree-q" placeholder="搜索知识点..." style="flex:1;min-width:160px" oninput="Tree.draw()">
     <select id="tree-subj" onchange="Tree.draw()"><option value="">全部科目</option>
-      ${Plan.syllabus().map(s=>`<option value="${s.id}">${esc(s.title)}</option>`).join("")}</select>
+      ${(()=>{const sl=Plan.syllabus();const gs=[...new Set(sl.map(s=>s.group||"其他"))];
+        return gs.map(g=>`<optgroup label="${esc(g)}">${sl.filter(s=>(s.group||"其他")===g).map(s=>`<option value="${s.id}">${esc(s.title)}</option>`).join("")}</optgroup>`).join("");})()}</select>
     <button class="btn sm ghost" id="tree-mind-btn" onclick="Tree.mindToggle()">🌳 思维导图</button>
     <button class="btn sm ghost" onclick="Tree.aiMerge()">🤖 AI 归并重复</button></div>
   <div class="muted" style="font-size:11px;margin-top:5px">知识树只收录知识点(纯知识点资料 / 知识点+例题教材), 题目不进入知识树; 不同资料的同名知识点自动归并(标 ×N 源)。点 ▸ 折叠/展开, 点节点名查看内容并可一键生成复习卡。</div>
@@ -1627,11 +1628,15 @@ const Tree={
        单子节点的壳直接上提折叠, 避免树里出现一串看不出内容的 "1.1 0%" */
     const isShell=id=>{ const k=IDX.kp[id]||{};
       return /^\d+(\.\d+)*$/.test(String(k.title||"").trim())&&!(k.content||"").trim(); };
-    const flatten=nd=>{ nd.kids=nd.kids.map(flatten)
-      .flatMap(k=>(isShell(k.id)&&k.kids.length===1)?k.kids:[k]); return nd; };
-    const built=mergeSibs(ids.filter(id=>!childSet.has(id)).map(id=>build(id,0))).map(flatten);
-    /* 顶层纯编号空壳(如章内 "1" 与章节本身重复): 上提其子节点 */
-    const top=built.flatMap(nd=>(isShell(nd.id)&&nd.kids.length)?nd.kids:[nd]);
+    /* P17: 保留完整编号层级链 (1.1 → 1.1.1 → 1.1.1.1), 不再折叠单子链;
+       纯编号壳的可读性由 dispTitle 跨级子标题概括保证 ("1.1　向量代数、平面、直线 等 4 节") */
+    const built=mergeSibs(ids.filter(id=>!childSet.has(id)).map(id=>build(id,0)));
+    /* 章级重复空根剔除: A 书 "第N章 X" 空壳 kp 与题库章节同名且无内容无子级 → 不上树(章名已由科目行呈现) */
+    const isChapDup=id=>{ const k=IDX.kp[id]||{};
+      return !String(k.content||"").trim()&&!(IDX.kpKids[id]||[]).length
+        && String(k.title||"").replace(/\s+/g," ").trim()===String((IDX.ch[k.chapterId]||{}).title||"").replace(/\s+/g," ").trim(); };
+    /* 顶层纯编号空壳(如章内 "1" 即第1章本身): 上提其子节点, 节级 1.1 起为树的第一层 */
+    const top=built.filter(nd=>!isChapDup(nd.id)).flatMap(nd=>(isShell(nd.id)&&nd.kids.length)?nd.kids:[nd]);
     /* P16: 教材最小标题级 —— 叶子知识点正文里的 "(1) 标题"/"（1）标题" 行解析为虚拟子节点 */
     const attachV=nd=>{ nd.kids.forEach(attachV);
       if(!nd.kids.length){ const segs=this._vSegs(IDX.kp[nd.id]||{});
@@ -1662,13 +1667,19 @@ const Tree={
     function badTitle(t){ return /^(典型)?例题(解析|讲解|精讲)?$|^(参考)?答案$|^习题|^练习题?$|^本章小结$|^小结$|^思考题$|^【例/.test(String(t||"").trim()); }
     return segs.filter(s=>s.title&&!badTitle(s.title));
   },
-  /* 空壳编号节点补充子节标题概括: "1.1.1" → "1.1.1　向量代数、平面、直线、曲面", 让层级一眼可读 */
+  /* 空壳编号节点补充子节标题概括(跨级收集): "1.1" → "1.1　向量代数、平面、直线 等 4 节",
+     中间纯编号壳(如 1.1.1)自动下钻取真实标题, 让 "1.1 / 1.1.1" 这类光秃编号一眼可读 */
   dispTitle(nd){
     const kp=IDX.kp[nd.id]||{};
     const t=String(kp.title||nd.id).trim();
     if(!/^\d+(\.\d+)*$/.test(t)||!nd.kids||!nd.kids.length) return t;
-    const ks=nd.kids.map(k=>{ const kt=String((IDX.kp[k.id]||{}).title||"").trim().replace(/\s+/g," ");
-      return /^\d+(\.\d+)*$/.test(kt)?null:kt; }).filter(Boolean);
+    const ks=[],seen=new Set();
+    const collect=(list,d)=>{ if(d>6) return;
+      for(const k of list){ const kt=String((IDX.kp[k.id]||{}).title||"").trim().replace(/\s+/g," ");
+        if(!kt) continue;
+        if(/^\d+(\.\d+)*$/.test(kt)) collect(k.kids||[],d+1);   // 纯编号壳: 下钻
+        else if(!seen.has(kt)){ seen.add(kt); ks.push(kt); } } };
+    collect(nd.kids,0);
     if(!ks.length) return t;
     return t+"　"+ks.slice(0,3).join("、")+(ks.length>3?(" 等 "+ks.length+" 节"):"");
   },
@@ -1927,14 +1938,14 @@ function isWeekend(d){ const w=new Date(d||Date.now()).getDay(); return w===0||w
 /* ---- 考纲科目表: 注册环保工程师·基础考试 真实卷结构 (权威口径, 可导入/手动增删, 编辑后存 ST.syllabus) ----
    公共基础 上午 120题×1分/4小时; 专业基础 下午 60题×2分/4小时。chapters=题库顶级章节映射(用于进度统计与组卷取题) */
 const SYLLABUS_PRESET=[
-  {id:"sj-math", title:"数学基础", group:"公共基础", examCount:24, score:1, cat:"calc", chapters:["a1","c1"]},
-  {id:"sj-phys", title:"物理基础", group:"公共基础", examCount:12, score:1, cat:"calc", chapters:["a2","c2"]},
-  {id:"sj-chem", title:"化学基础", group:"公共基础", examCount:10, score:1, cat:"calc", chapters:["a3","c3"]},
+  {id:"sj-math", title:"高等数学", group:"公共基础", examCount:24, score:1, cat:"calc", chapters:["a1","c1"]},
+  {id:"sj-phys", title:"普通物理", group:"公共基础", examCount:12, score:1, cat:"calc", chapters:["a2","c2"]},
+  {id:"sj-chem", title:"普通化学", group:"公共基础", examCount:10, score:1, cat:"calc", chapters:["a3","c3"]},
   {id:"sj-tm",   title:"理论力学", group:"公共基础", examCount:12, score:1, cat:"calc", chapters:["a4","c4"]},
   {id:"sj-mm",   title:"材料力学", group:"公共基础", examCount:12, score:1, cat:"calc", chapters:["a5","c5"]},
   {id:"sj-fm",   title:"流体力学", group:"公共基础", examCount:8,  score:1, cat:"calc", chapters:["a6","c6"]},
-  {id:"sj-elec", title:"电气技术", group:"公共基础", examCount:12, score:1, cat:"calc", chapters:["a8","c8"]},
-  {id:"sj-comp", title:"计算机基础",group:"公共基础",examCount:10, score:1, cat:"mix",  chapters:["a7","c7"]},
+  {id:"sj-elec", title:"电工电子技术", group:"公共基础", examCount:12, score:1, cat:"calc", chapters:["a8","c8"]},
+  {id:"sj-comp", title:"计算机应用基础",group:"公共基础",examCount:10, score:1, cat:"mix",  chapters:["a7","c7"]},
   {id:"sj-sig",  title:"信号与信息",group:"公共基础", examCount:6,  score:1, cat:"mem",  chapters:[]},
   {id:"sj-eco",  title:"工程经济", group:"公共基础", examCount:8,  score:1, cat:"mem",  chapters:["a9","c9"]},
   {id:"sj-law",  title:"法律法规", group:"公共基础", examCount:6,  score:1, cat:"mem",  chapters:[]},
@@ -2100,7 +2111,7 @@ function vPlan(){
       <span class="muted" style="font-size:11.5px">· 📺 课程列 = 资料库中该科目的未看完/总视频数, 在「资料库」里给视频选章节即可自动归到对应科目</span>
     </div>
     <div id="syllabus-import-box" style="display:none;margin-top:8px;border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:8px">
-      <textarea id="syllabus-import" rows="5" placeholder="每行一个科目, 如:&#10;数学基础 24&#10;1. 物理基础 12题&#10;我的自定义科目 30" style="width:100%"></textarea>
+      <textarea id="syllabus-import" rows="5" placeholder="每行一个科目, 如:&#10;高等数学 24&#10;1. 普通物理 12题&#10;我的自定义科目 30" style="width:100%"></textarea>
       <div class="row" style="margin-top:6px"><button class="btn sm" onclick="Plan.importSyllabus()">解析导入</button>
         <span class="muted" style="font-size:11.5px">名称与现有考纲科目匹配则更新题量, 否则新增为自定义科目(不关联题库章节)。</span></div>
     </div>
@@ -2272,8 +2283,17 @@ const Plan={save(){
   ST.settings.dailyNew=Math.round((Math.round(ST.settings.weekdayMin/6)+Math.round(ST.settings.weekendMin/6))/2);
   Store.save("settings"); vPlan(); toast("计划已更新");
 },
-/* 科目清单: 以考纲科目表为准(默认内置17科), 合并用户覆盖(类别/状态/权重); 题库章节映射其上统计进度 */
-syllabus(){ return (Array.isArray(ST.syllabus)&&ST.syllabus.length)?ST.syllabus:SYLLABUS_PRESET; },
+/* 科目清单: 以考纲科目表为准(默认内置17科), 合并用户覆盖(类别/状态/权重); 题库章节映射其上统计进度
+   旧存档科目名自动迁移到考纲标准名(数学基础→高等数学等), 仅按 id 改标题, 不动用户的类别/权重设置 */
+syllabus(){
+  const RENAME={"sj-math":"高等数学","sj-phys":"普通物理","sj-chem":"普通化学","sj-elec":"电工电子技术","sj-comp":"计算机应用基础"};
+  const cur=(Array.isArray(ST.syllabus)&&ST.syllabus.length)?ST.syllabus:SYLLABUS_PRESET;
+  let need=false; for(const s of cur){ if(RENAME[s.id]&&s.title!==RENAME[s.id]){ need=true; break; } }
+  if(!need) return cur;
+  const out=cur.map(s=>(RENAME[s.id]&&s.title!==RENAME[s.id])?Object.assign({},s,{title:RENAME[s.id]}):s);
+  if(cur!==SYLLABUS_PRESET){ ST.syllabus=out; try{ Store.save("syllabus"); }catch(e){} }
+  return out;
+},
 /* ---------- P7: 科目统一口径 ----------
    资料(视频/知识点)各自文件内部可保留自己的章节, 但一切统计/展示/计划一律归一到考纲科目。 */
 /* 章节 id -> 考纲科目 */
