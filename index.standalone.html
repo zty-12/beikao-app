@@ -1728,15 +1728,34 @@ const Tree={
     if(this._numParentOf&&this._numParentOf[id]) return this._numParentOf[id]; return null; },
   pathOf(id){ const arr=[]; let cur=id,g=0;
     while(cur&&g++<20){ const k=IDX.kp[cur]; if(!k)break; arr.unshift(k.title); cur=this._parentOf(cur); } return arr; },
+  /* P18b: 目录壳节点(如"主要知识点")自身无正文 → 聚合展示全部后代知识点的内容 */
+  _aggHTML(id,depth){
+    if(depth>4) return "";
+    let out="";
+    (IDX.kpKids[id]||[]).forEach(kid=>{
+      const k=IDX.kp[kid]||{}; const c=(k.content||"").trim();
+      const sub=this._aggHTML(kid,depth+1);
+      if(!c&&!sub) return;
+      out+=`<div style="margin:10px 0 2px;font-weight:600;color:var(--pri)">${esc(String(k.title||kid))}</div>`;
+      if(c) out+=`<div class="kp-content" style="line-height:1.85">${kpContentHTML(k)}</div>`;
+      out+=sub;
+    });
+    return out;
+  },
   detail(id){
     const kp=IDX.kp[id]; const box=$("#tree-detail"); if(!kp){ return; }
     this._calcNumTree();
     const path=this.pathOf(id);
     const crumb=path.length>1?`<div class="muted" style="font-size:12px;margin-bottom:2px">${path.slice(0,-1).map(t=>esc(t)).join(" › ")}</div>`:"";
     const depthLabel=path.length>1?` · 第 ${path.length} 级`:"";
+    const own=(kp.content||"").trim();
+    const agg=own?"":this._aggHTML(id,0);
+    const body=own?kpContentHTML(kp)
+      :(agg?`<div class="muted" style="font-size:12px;margin-bottom:4px">本节点为目录壳, 以下汇总其子知识点内容:</div>${agg}`
+           :kpContentHTML(kp));
     box.innerHTML=`<div class="card"><h2 style="font-size:15px">${esc(kp.title||id)}</h2>${crumb}
       <div class="muted" style="font-size:11px;margin-bottom:6px">所属章节: ${esc(chapPath(kp.chapterId))}${depthLabel}</div>
-      <div class="kp-content" style="line-height:1.85;margin:10px 0">${kpContentHTML(kp)}</div>
+      <div class="kp-content" style="line-height:1.85;margin:10px 0">${body}</div>
       ${kp.media&&kp.media.length?`<div style="margin:8px 0">${kp.media.map(m=>`<img class="media-img" src="${mediaSrc(m)}" alt="配图" style="max-width:100%;border-radius:6px;margin:4px 0" onerror="this.style.display='none'">`).join("")}</div>`:""}
       ${(kp.tags||[]).length?`<div class="row" style="flex-wrap:wrap;gap:6px;margin-top:4px">${kp.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</div>`:""}
       ${kp.sourcePage?`<div class="muted" style="margin-top:6px;font-size:12px">出处: ${esc(kp.sourceBook||"")} p${esc(kp.sourcePage)}</div>`:""}
