@@ -1977,8 +1977,16 @@ function renderPlanMini(box){
     <span style="font-size:12.5px">${tg.map(x=>esc(x.title)).join("、")}</span>
     ${(td&&td.kps&&td.kps.length)?`<div class="muted" style="font-size:11.5px;margin-top:2px">知识点: ${esc((td.kps||[]).slice(0,6).join("、"))}${(td.kps||[]).length>6?" 等":""}</div>`:""}</span>
     <span style="font-size:12px;white-space:nowrap"><a href="javascript:Brush.startWeek()" style="color:var(--pri)">定向开刷</a></span></div>`:"";
+  /* P15: 今日具体学习范围 + 艾宾浩斯复习清单(来自 AI 排程落位) */
+  const sty=(td&&td.study)||[], rev=(td&&td.review)||[];
+  const styHTML=sty.length?`<div class="checkline"><input type="checkbox" disabled>
+    <span class="grow"><b>📚 今日学习</b> <span class="muted" style="font-size:11.5px">(今日应覆盖的具体知识点)</span><br>
+    ${sty.map(e=>`<span class="tag" style="margin:3px 4px 0 0" title="${esc(e.s||"")}">${esc((e.s||"").slice(0,8))} · ${esc((e.k||"").slice(0,16))}</span>`).join("")}</span></div>`:"";
+  const revHTML=rev.length?`<div class="checkline"><input type="checkbox" disabled>
+    <span class="grow"><b>🔁 今日复习</b> <span class="muted" style="font-size:11.5px">(艾宾浩斯 ${[...new Set(rev.map(r=>"D+"+r.n))].join("/")})</span><br>
+    ${rev.map(e=>`<span class="tag" style="margin:3px 4px 0 0;background:rgba(230,126,34,.12);color:#c0782a" title="${esc(e.s||"")}">${esc((e.s||"").slice(0,8))} · ${esc((e.k||"").slice(0,16))}</span>`).join("")}</span></div>`:"";
   box.innerHTML=`<div class="row">${p.days!==null?`<div class="ring" style="--p:${tasks.length?done/tasks.length*100:0}"><i>${p.days}天</i></div>`:""}
-  <div class="grow">${p.sprint?"":lesHTML}${p.sprint?"":tgtHTML}${tasks.map((t,i)=>`<div class="checkline"><input type="checkbox" ${t[1]?"checked":""} disabled>
+  <div class="grow">${p.sprint?"":lesHTML}${p.sprint?"":tgtHTML}${styHTML}${revHTML}${tasks.map((t,i)=>`<div class="checkline"><input type="checkbox" ${t[1]?"checked":""} disabled>
     <span class="grow" style="${t[1]?"text-decoration:line-through;color:var(--tx2)":""}">${t[0]}</span>
     <a href="#${t[2]}" style="color:var(--pri);font-size:12px">去完成</a></div>`).join("")}</div></div>
   ${p.sprint?'<div class="tag warn" style="margin-top:8px">冲刺模式: 距考试 ≤14 天, 只刷模考+错题+到期卡</div>':""}
@@ -2424,8 +2432,17 @@ gen(aiAlloc){
       const tot=f.reduce((a,x)=>a+x.pct,0);
       return f.length?{ym,list:f.map(x=>({id:x.id,pct:Math.round(x.pct/(tot||1)*100)}))}:null;
     }).filter(Boolean);
+    const wkList=(aiAlloc&&Array.isArray(aiAlloc.weeks)?aiAlloc.weeks:[]).map((w,i)=>{
+      if(!w) return null;
+      const parseSide=s=>{ if(!s) return null;
+        const id=byIdOrName(typeof s==="string"?s:(s.id||s.name)); if(!id) return null;
+        return {id,ch:Array.isArray(s.ch)?s.ch.map(v=>norm(v)).filter(Boolean).slice(0,8):[]}; };
+      return {n:+w.n||i+1,wd:parseSide(w.wd),we:parseSide(w.we),
+        review:norm(w.review).slice(0,140),goal:norm(w.goal).slice(0,140)};
+    }).filter(Boolean);
+    const strategy=aiAlloc&&aiAlloc.strategy&&typeof aiAlloc.strategy==="object"?aiAlloc.strategy:null;
     if(aiAlloc) aiInfo={mode:aiAlloc.mode==="sequential"?"sequential":"mixed",order:ord,focusArr,
-      notes:String(aiAlloc.notes||"").slice(0,400)};
+      weeks:wkList,strategy,notes:String(aiAlloc.notes||"").slice(0,400)};
   }
   const order=aiInfo
     ? subj.slice().sort((a,b)=>aiInfo.order.indexOf(a.id)-aiInfo.order.indexOf(b.id))
@@ -2469,6 +2486,7 @@ gen(aiAlloc){
     kpTitles[x.id]=ks.map(k=>String(k.title||"").trim()).filter(Boolean).slice(0,80);
   });
   const curKp={}; subj.forEach(x=>curKp[x.id]=0);
+  const weekDays=[], weekObjs=[]; let gwi=0;
   const months=[]; const byYm={};
   dates.forEach((d,i)=>{
     const ym=fmtD(d).slice(0,7);
@@ -2491,9 +2509,15 @@ gen(aiAlloc){
     m.ds.forEach(d=>{ if(d.getDay()===1&&seg.length){ ws.push(seg); seg=[]; } seg.push(d); });
     if(seg.length) ws.push(seg);
     m.weeks=ws.map((sg,wi)=>{
-      /* 周科目选取: AI 单科推进 → 本月主科(末周带衔接科); AI 混配 → 按月内科目轮转; 默认 → 权重轮转 */
+      /* AI 逐周安排(前12周): 直接指定工作日主攻科目+知识点范围 / 周末背诵科目 / 复习重点 */
+      const aw=aiInfo&&Array.isArray(aiInfo.weeks)?aiInfo.weeks[gwi]:null; gwi++;
+      /* 周科目选取: AI 指定 → 用之; 否则 AI 单科推进 → 本月主科(末周带衔接科); AI 混配 → 月内轮转; 默认 → 权重轮转 */
       let picks;
-      if(aiInfo&&m.subjects.length){
+      const sjById=id=>subj.find(x=>x.id===id);
+      if(aw&&aw.wd&&sjById(aw.wd.id)){
+        picks=[sjById(aw.wd.id)];
+        if(aiInfo.mode==="sequential"&&wi===ws.length-1&&aw.we&&aw.we.id!==aw.wd.id&&sjById(aw.we.id)) picks.push(sjById(aw.we.id));
+      } else if(aiInfo&&m.subjects.length){
         if(aiInfo.mode==="sequential"){
           picks=wi>=ws.length-1&&m.subjects.length>1?m.subjects.slice(0,2):m.subjects.slice(0,1);
         } else {
@@ -2501,15 +2525,65 @@ gen(aiAlloc){
           picks=[0,1,2].slice(0,n).map(k=>m.subjects[(wi+k)%m.subjects.length]);
         }
       } else picks=[order[(wi*3)%order.length],order[(wi*3+1)%order.length],order[(wi*3+2)%order.length]].filter(Boolean);
-      const items=picks.map(x=>{ const pool=kpTitles[x.id]||[]; const take=[];
-        for(let t=0;t<4&&curKp[x.id]<pool.length;t++){ take.push(pool[curKp[x.id]++]); }
-        return {id:x.id,title:x.title,cat:x.cat,kps:take}; });
-      return {range:fmtD(sg[0])+" ~ "+fmtD(sg[sg.length-1]),start:fmtD(sg[0]),end:fmtD(sg[sg.length-1]),days:sg.length,
-        brushGoal:sg.reduce((a,d)=>a+dayTargetFor(fmtD(d)).brush,0),items};
+      /* 知识点绑定: AI 给了关键词则在该科池内匹配未消费的标题, 否则按游标顺序推进 */
+      const bindKps=(x,chKws)=>{
+        const pool=kpTitles[x.id]||[]; const take=[];
+        if(chKws&&chKws.length){
+          let last=-1;
+          for(let t=curKp[x.id];t<pool.length&&take.length<6;t++){
+            const pt=pool[t];
+            if(chKws.some(kw=>pt.includes(kw)||kw.includes(pt))){ take.push(pt); last=t; }
+          }
+          if(take.length){ curKp[x.id]=last+1; return take; }
+        }
+        for(let t=0;t<4&&curKp[x.id]<pool.length;t++) take.push(pool[curKp[x.id]++]);
+        return take;
+      };
+      const items=picks.map(x=>({id:x.id,title:x.title,cat:x.cat,kps:bindKps(x,aw&&aw.wd?aw.wd.ch:null)}));
+      /* 周末背诵科目: AI 指定 → 用之; 否则该周 mem 科; 无 mem 科则同主科 */
+      let wePicks=aw&&aw.we&&sjById(aw.we.id)?[sjById(aw.we.id)]:picks.filter(x=>x.cat==="mem");
+      if(!wePicks.length) wePicks=picks.slice(0,1);
+      const weItems=wePicks.map(x=>({id:x.id,title:x.title,cat:x.cat,kps:bindKps(x,aw&&aw.we?aw.we.ch:null)}));
+      const w={range:fmtD(sg[0])+" ~ "+fmtD(sg[sg.length-1]),start:fmtD(sg[0]),end:fmtD(sg[sg.length-1]),days:sg.length,
+        brushGoal:sg.reduce((a,d)=>a+dayTargetFor(fmtD(d)).brush,0),items,weItems,
+        review:aw?aw.review:"",goal:aw?aw.goal:""};
+      weekDays.push(sg); weekObjs.push(w);
+      return w;
     });
   });
   // ---- P6: 课程排程 —— 各科未看完的视频在"该科出现的周"里顺序推进 ----
   const courseStat=this.scheduleCourses(months);
+  // ---- P15: 每日学习/复习落位 —— 工作日=学习知识点, 周末=背诵; 按 D+1/2/4/7/15/30 生成艾宾浩斯复习清单 ----
+  const dayStudy={}, learnAt={}, reviewAt={};
+  const RNODES=(aiInfo&&aiInfo.strategy&&Array.isArray(aiInfo.strategy.reviewNodes)&&aiInfo.strategy.reviewNodes.length)
+    ?aiInfo.strategy.reviewNodes.map(Number).filter(n=>n>0).slice(0,8):[1,2,4,7,15,30];
+  weekDays.forEach((sg,wi2)=>{
+    const w=weekObjs[wi2]; if(!w) return;
+    const wdKps=[], weKps=[];
+    (w.items||[]).forEach(it=>(it.kps||[]).forEach(k=>wdKps.push({s:it.title,k})));
+    (w.weItems&&w.weItems.length?w.weItems:w.items||[]).forEach(it=>(it.kps||[]).forEach(k=>weKps.push({s:it.title,k})));
+    const wdays=sg.filter(d=>!isWeekend(d)), wends=sg.filter(d=>isWeekend(d));
+    const per=Math.ceil(wdKps.length/Math.max(1,wdays.length))||0;
+    wdays.forEach((d,i)=>{ if(per) dayStudy[fmtD(d)]=wdKps.slice(i*per,(i+1)*per); });
+    const per2=Math.ceil(weKps.length/Math.max(1,wends.length))||0;
+    wends.forEach((d,i)=>{ if(per2) dayStudy[fmtD(d)]=weKps.slice(i*per2,(i+1)*per2); });
+  });
+  Object.keys(dayStudy).forEach(dt=>dayStudy[dt].forEach(e=>{
+    const key=e.s+"|"+e.k; if(!learnAt[key]) learnAt[key]={dt,s:e.s,k:e.k};
+  }));
+  Object.keys(learnAt).forEach(key=>{
+    const e=learnAt[key]; const d0=new Date(e.dt+"T00:00:00");
+    RNODES.forEach(n=>{
+      const t=fmtD(new Date(d0.getTime()+n*864e5));
+      (reviewAt[t]=reviewAt[t]||[]).push({s:e.s,k:e.k,n});
+    });
+  });
+  const dayPlan={};
+  Object.keys(dayStudy).concat(Object.keys(reviewAt)).forEach(dt=>{
+    if(!dayPlan[dt]) dayPlan[dt]={study:[],review:[]};
+    if(dayStudy[dt]) dayPlan[dt].study=dayStudy[dt].slice(0,8);
+    if(reviewAt[dt]) dayPlan[dt].review=reviewAt[dt].slice(0,10);
+  });
   months.forEach(m=>delete m.ds);
   ST.plan={engine:aiInfo?"ai-alloc":"deterministic",v:2,
     source:aiInfo?("AI 智能排程 · "+(aiInfo.mode==="sequential"?"单科推进":"科目混配")):"确定性引擎",
@@ -2517,7 +2591,8 @@ gen(aiAlloc){
     generatedAt:today0,examName:s.examName,examDate,days,total,done,remaining,
     weekdayMin:+s.weekdayMin,weekendMin:+s.weekendMin,weekendFactor:wk,pomo,factor,learnRatio:s.learnRatio||{base:60,mid:40,sprint:15},
     brushW,brushE,newW,newE,catRouting:{calc:"工作日主攻",mem:"周末背诵",mix:"工作日原理+周末综合"},
-    phases,subjectPlan,mockDays,weekdayTemplate,weekendTemplate,months,courseStat,adj};
+    phases,subjectPlan,mockDays,weekdayTemplate,weekendTemplate,months,courseStat,adj,dayPlan,
+    reviewNodes:RNODES};
   Store.save("plan"); this.ensureTasks(true); this.renderDet();
   try{ renderPlanMini($("#plan-today")); }catch(e){}
   toast(aiInfo
@@ -2574,10 +2649,12 @@ ensureTasks(force){
     if(raw.sprint) brush=0;                                     // 冲刺期: 模考+错题为主
     const chs=[]; items.forEach(it=>{ const sj=this.syllabus().find(x=>x.id===it.id);
       (sj&&sj.chapters||[]).forEach(c=>{ if(!chs.includes(c)) chs.push(c); }); });
+    const dp=(ST.plan&&ST.plan.dayPlan)?ST.plan.dayPlan[dt]:null;
     ST.taskDays[dt]={v:2,brush,cards:Math.max(2,Math.round(mins/25)),
       courseMin:mins-brushMin,brushMin,ratio:Math.round(ratio*100),
       lessons:mine, targets:items.map(it=>({id:it.id,title:it.title,cat:it.cat})),
       kps:items.flatMap(it=>it.kps||[]).slice(0,12), chapters:chs,
+      study:dp?(dp.study||[]):[], review:dp?(dp.review||[]):[],
       phase:(w&&w.m.phase)||"", week:(w&&w.w.range)||""};
     added++;
   }
@@ -2606,6 +2683,9 @@ renderHiera(){
           <span class="tag ${i.cat==="calc"?"":i.cat==="mem"?"ok":"warn"}">${esc(i.title)}</span>
           ${i.course&&i.course.total?`<span class="muted" style="font-size:11.5px">课程 ${i.course.done}/${i.course.total} 已看完</span>`:""}
           ${i.kps.length?i.kps.map(k=>esc(k)).join(" · "):'<span class="muted">该科知识点已推进完/题库未覆盖, 以刷题为主</span>'}</div>`).join("")}
+        ${(w.weItems&&w.weItems.length)?`<div style="margin:4px 0 4px 14px;font-size:12.5px">${w.weItems.map(i=>`<span class="tag ok" style="margin-right:4px">周末背诵·${esc(i.title)}</span>${i.kps.length?`<span style="font-size:12px">${esc(i.kps.join(" · "))}</span>`:""}`).join("")}</div>`:""}
+        ${w.goal?`<div class="muted" style="margin-left:14px;font-size:11.5px">🎯 周目标: ${esc(w.goal)}</div>`:""}
+        ${w.review?`<div class="muted" style="margin-left:14px;font-size:11.5px;color:#c0782a">🔁 艾宾浩斯复习: ${esc(w.review)}</div>`:""}
         <div class="muted" style="margin-left:14px;font-size:11.5px">每天顺序: 先跟课/教材 → 再做本周范围的检验题; 额度按工作日/周末折算(假期自动降额), 到期闪卡优先。</div>
       </details>`; }).join("")}
     </details>`; }).join("");
@@ -2743,26 +2823,29 @@ ${holidayLine}
 【模考建议】应用支持「自定义组卷 + 保存模考模板(可固定种子复现同一套卷)」, 计划里请安排每周末至少 1 套全真模考, 并说明如何用模考报告定位薄弱章。
 【输出结构】严格按以下标题结构输出, 每一节都必须写出具体、可执行的实质内容(具体到章节名/日期/天数/题量/正确率数字), 禁止留空、禁止只写括号里的提示语、禁止输出"略"或占位符:
 # 备考学习计划
-## 一、总体概览
-(3~5行: 距考试剩余天数、总题量与已完成量、通过率要求、一句话核心策略)
-## 二、阶段规划
+## 一、时间资源总览
+(表格: 工作日/周末 天数×每天时长=周小计; 表格: 三阶段 起止日期+工作日学时+周末学时+阶段总学时)
+## 二、复习策略
+### 艾宾浩斯记忆曲线应用 (表格: D+1/D+2/D+4/D+7/D+15/D+30 各节点的作用, 说明计划中如何落地)
+### 工作日 vs 双休日分工 (表格: 时段/适合任务/对应科目)
+### 科目分类策略 (表格: 类别(理解计算型/记忆理解型/综合应用型)/科目/学习策略)
+## 三、阶段规划
 ### 阶段一 · 阶段名(起止日期)
-- 目标: (写清该阶段结束时达到什么水平)
-- 重点章节: (从掌握数据里点名具体薄弱章, 至少3个)
+- 阶段目标: (写清该阶段结束时达到什么水平)
+- 每周节奏模板: 工作日每天${mins}分钟怎么切(前段学新/中段做题/末段复习, 具体到分钟), 周末怎么切(上午/下午/晚上各做什么)
 - 量化指标: (阶段总刷题量/目标正确率/模考次数, 用数字)
-- 主要手段: (顺序刷题/错题清零/背诵卡/套卷模考, 说明怎么用)
-### 阶段二 · ...(同上结构)
-### 阶段三 · ...(同上结构)
-## 三、每周安排
-| 周次 | 所属阶段 | 本周重点 | 刷题目标 | 背诵目标 |
-(每阶段列2~3个代表周, 本周重点要写具体章节名)
-## 四、每日执行模板
-| 环节 | 时长 | 内容 |
-(把每日${mins}分钟拆分到 刷题/背诵/错题复盘/模考, 时长总和= ${mins}分钟, 内容写具体做什么)
-## 五、科目策略
-(结合掌握数据逐章分析: 未刷的章怎么启动、正确率低的章怎么补救、正确率高的章怎么保持, 每章1~2句)
-## 六、动态调整机制
-(每周末复评什么指标、正确率低于多少触发什么调整、进度落后怎么补)
+### 阶段二/三 · ...(同上结构)
+## 四、逐周计划表 (核心, 必须逐周列满从本周到考试的全部周)
+| 周次 | 日期 | 工作日(科目+章节) | 周末(①习题科目 ②背诵科目+章节) | 艾宾浩斯复习重点 |
+(工作日/周末写具体科目名+章节名, 结合各章掌握情况把薄弱章排进对应周; 每月末周安排月度总复习)
+## 五、双休日背诵详细安排
+(记忆型科目逐轮: 每轮第几个周末/周六背什么章节/周日背什么章节+复习什么, 写到具体章节名)
+## 六、刷题安排
+| 月份 | 刷题重点(科目+章节) | 题量目标 | 周末安排 |
+## 七、各科备考建议
+| 科目 | 难度(星级) | 建议投入时间 | 备考要点 |
+## 八、动态调整机制
+(每周末复评什么指标、正确率低于多少触发什么调整、进度落后怎么补; 模考如何用报告定位薄弱章)
 ${adjust&&ST.aiPlan&&ST.aiPlan.md?"【已有计划与最新进度】保留已完成部分, 重点调整未完成内容:\n"+String(ST.aiPlan.md).slice(0,1600):"基线: 按基础/强化/冲刺三阶段展开。"}
 只输出 Markdown 正文本身, 不要用代码块包裹, 不要附加任何解释。`;
   const out=$("#ai-plan-out"); if(out) out.innerHTML='<div class="muted">AI 正在生成计划, 请稍候…'+(isLocal?'<br>使用本地模型, 生成约需 1~3 分钟, 请勿关闭页面':'')+'</div>';
@@ -2804,7 +2887,13 @@ async aiSched(){
       min+=m; }
     return ym+"≈"+Math.round(min/60)+"h";
   }).join(" · ");
-  const prompt=`你是备考排程引擎。请根据以下数据, 把未来 ${monthsN} 个月的复习时间分配到各科目, 输出严格 JSON。
+  /* 知识点菜单: 每科前 40 个知识点标题, 供 AI 在逐周安排里绑定具体范围 */
+  const menu=act.map(x=>{
+    const ks=(BANK.knowledgePoints||[]).filter(k=>(k.content||"").trim()&&!/^\d+(\.\d+)*$/.test(String(k.title||"").trim())
+      &&(x.chapters||[]).some(c=>k.chapterId===c||k.chapterId.startsWith(c+"-")));
+    return x.title+": "+ks.slice(0,40).map(k=>String(k.title).trim()).join(" | ");
+  }).join("\n").slice(0,14000);
+  const prompt=`你是备考排程引擎。请根据以下数据, 把未来 ${monthsN} 个月的复习时间分配到各科目, 并给出逐周详细安排, 输出严格 JSON。
 【用户约束】考试: ${ST.settings.examName||""}；日期: ${ST.settings.examDate||"未设置"}；工作日 ${+ST.settings.weekdayMin||90}分钟/天, 周末 ${+ST.settings.weekendMin||240}分钟/天 × 周末强度系数${wkF}；番茄钟 ${pomoM}分钟/个；目标分 ${ST.settings.targetScore||132}。
 【时间预算(必须作为约束)】听课占比: 基础期 ${lrB.base}%、强化期 ${lrB.mid}%、冲刺期 ${lrB.sprint}% 的时长先用于看视频课(跟课), 其余时间刷题/背诵 —— 各科"课程剩余估时"要优先用听课时间消化, 课程没排完的科目应获得足够月份。每月可用时长见下方, 分配的时间占比之和不能超过该月可用时长。
 【各月可用时间】${monthMin}
@@ -2814,13 +2903,17 @@ async aiSched(){
 ${load.map(l=>`${l.id}|${l.title}|${l.cat}|${l.weight}|${l.kps}|${l.lessonLeft}/${l.lessons}/${l.lessonEstMin}|${l.qRem}/${l.qTotal}|${l.acc}%|${l.examScore}`).join("\n")}
 【未来月份】${yms.join(", ")}
 【假期】${hds.length?hds.map(h=>h.start+"~"+h.end).join("、"):"无"}(假期强度已折算进各月可用时间)
+【科目知识点菜单】(weeks 里 ch 字段的关键词必须从这里选, 写知识点标题或其前缀)
+${menu}
 【要求】
 1. order: 全部纳入科目的学习先后顺序(综合知识点量、课程估时、难易与分值性价比排序)。
 2. months: 每月 focus 给出该月时间占比, 每月合计≈100。sequential 模式每月 focus 通常只含 1 科(衔接月可 2 科)；mixed 模式每月 2~3 科。
-3. 课程估时大的科目要给足月份; 正确率低的科目适当多配; 记忆型(mem)科目靠近考试月份占比应提高; 时间分配须满足【时间预算】(听课占比/各月可用时长)。
-4. notes: 一两句话说明分配理由。
+3. weeks: 未来前 12 周的逐周详细安排。每周: wd=工作日主攻(科目id + ch:该周要覆盖的知识点关键词数组, 从菜单选 3~6 个)；we=周末主攻(背诵/综合科目id + ch 关键词)；review=本周艾宾浩斯复习重点(指明复习第几周的什么内容, 如"复习第1周高数知识点(D+7/D+15节点)")；goal=一句话周目标。weeks[i].n=i+1, 第1周=本周。
+4. 课程估时大的科目要给足月份; 正确率低的科目适当多配; 记忆型(mem)科目靠近考试月份占比应提高; 时间分配须满足【时间预算】(听课占比/各月可用时长)。工作日安排理解计算型, 周末安排记忆背诵型。
+5. strategy.reviewNodes 固定 [1,2,4,7,15,30] (艾宾浩斯复习节点, 天数)。
+6. notes: 一两句话说明分配理由。
 只输出 JSON 本体, 不要代码块、不要解释。格式:
-{"mode":"${mode}","order":["科目id",...],"months":[{"ym":"${yms[0]||"2026-10"}","focus":[{"id":"科目id","pct":60},...]},...],"notes":"..."}`;
+{"mode":"${mode}","order":["科目id",...],"months":[{"ym":"${yms[0]||"2026-10"}","focus":[{"id":"科目id","pct":60},...]},...],"weeks":[{"n":1,"wd":{"id":"科目id","ch":["知识点关键词","..."]},"we":{"id":"科目id","ch":["..."]},"review":"复习第1周内容(D+7)","goal":"完成xx知识点"},...],"strategy":{"reviewNodes":[1,2,4,7,15,30]},"notes":"..."}`;
   const out=$("#ai-plan-out"); if(out) out.innerHTML='<div class="muted">🤖 AI 正在分析各科知识点数量 / 课程剩余时长 / 难易度, 并分配每月任务…(本地模型约 1~3 分钟, 请勿关闭页面)</div>';
   try{
     const txt=aiTxt(await aiChat(prompt,{temperature:0.2,timeout:600000})).replace(/^```(json)?\s*/i,"").replace(/```\s*$/,"").trim();
