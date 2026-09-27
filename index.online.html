@@ -1631,7 +1631,36 @@ const Tree={
       .flatMap(k=>(isShell(k.id)&&k.kids.length===1)?k.kids:[k]); return nd; };
     const built=mergeSibs(ids.filter(id=>!childSet.has(id)).map(id=>build(id,0))).map(flatten);
     /* 顶层纯编号空壳(如章内 "1" 与章节本身重复): 上提其子节点 */
-    return built.flatMap(nd=>(isShell(nd.id)&&nd.kids.length)?nd.kids:[nd]);
+    const top=built.flatMap(nd=>(isShell(nd.id)&&nd.kids.length)?nd.kids:[nd]);
+    /* P16: 教材最小标题级 —— 叶子知识点正文里的 "(1) 标题"/"（1）标题" 行解析为虚拟子节点 */
+    const attachV=nd=>{ nd.kids.forEach(attachV);
+      if(!nd.kids.length){ const segs=this._vSegs(IDX.kp[nd.id]||{});
+        if(segs.length>=2) nd.vkids=segs; } };
+    top.forEach(attachV);
+    return top;
+  },
+  /* 解析知识点正文: 行首 "(N) 标题" / "（N）标题：说明" 为最小标题行,
+     该行起至下一个最小标题行止为该节内容; 标题取冒号前段, 冒号后文字并入正文 */
+  _vSegs(kp){
+    const lines=String((kp||{}).content||"").split("\n"); const segs=[]; let cur=null;
+    for(const raw of lines){
+      /* 行中切段: 句号/分号后紧跟 "(N)" 的(如 "...试验方法。(2)生活垃圾特性分析")也切开 */
+      for(const l of raw.trim().split(/(?<=[。；])\s*(?=[（(]\d{1,2}[)）])/)){
+        const t=l.trim(); if(!t){ continue; }
+        const m=t.match(/^[（(](\d{1,2})[)）]\s*(.+)$/);
+        if(m){ if(cur) segs.push(cur);
+          const full=m[2].trim(); let title=full,body="";
+          const ci=full.search(/[：:]/);
+          if(ci>0){ title=full.slice(0,ci).trim(); body=full.slice(ci+1).trim(); }
+          else{ const pi=full.search(/[。；]/);   // 无冒号: 首个句号/分号前段作标题, 防整句进树
+            if(pi>0&&pi<=30){ title=full.slice(0,pi).trim(); body=full.slice(pi+1).trim(); } }
+          cur={n:+m[1],title:title||full,body}; }
+        else if(cur) cur.body+=(cur.body?"\n":"")+t; }
+    }
+    if(cur) segs.push(cur);
+    /* 剔除非知识点标题: 例题解析/习题/答案/小结等教学辅助区块 (精确匹配, 不误伤"解析法"等真知识点) */
+    function badTitle(t){ return /^(典型)?例题(解析|讲解|精讲)?$|^(参考)?答案$|^习题|^练习题?$|^本章小结$|^小结$|^思考题$|^【例/.test(String(t||"").trim()); }
+    return segs.filter(s=>s.title&&!badTitle(s.title));
   },
   /* 空壳编号节点补充子节标题概括: "1.1.1" → "1.1.1　向量代数、平面、直线、曲面", 让层级一眼可读 */
   dispTitle(nd){
@@ -1663,14 +1692,22 @@ const Tree={
   node(nd,kw,depth){
     const kp=IDX.kp[nd.id]||{};
     const title=this.dispTitle(nd);
+    const vs=nd.vkids||[];
     const match=!kw||(title||"").toLowerCase().includes(kw)||(kp.content||"").toLowerCase().includes(kw);
-    const kids=nd.kids.map(k=>this.node(k,kw,depth+1)).join("");
+    const pid=nd.id.replace(/"/g,"");
+    const kids=nd.kids.map(k=>this.node(k,kw,depth+1)).join("")
+      +vs.map(s=>{
+        const vt=this._vTitle(s.title);
+        const vm=!kw||s.title.toLowerCase().includes(kw)||(s.body||"").toLowerCase().includes(kw);
+        if(kw&&!vm) return "";
+        return `<div class="tree-node"><div class="lb" onclick="Tree.vDetail('${pid}',${s.n})"><span style="color:var(--tx2)">·</span><span class="grow">(${s.n}) ${esc(vt)}</span></div></div>`;
+      }).join("");
     if(kw&&!match&&!kids) return "";
     const m=kpMastery(nd.id); const pct=m===null?0:Math.round(m*100);
     const bar=`<span class="prog-mini bar"><i style="width:${pct}%;background:${pct>70?"var(--ok)":pct>30?"var(--warn)":"var(--bad)"}"></i></span>
       <span class="muted" style="width:34px;text-align:right">${m===null?"-":pct+"%"}</span>`;
     const srcTag=nd.src>1?`<span class="tag" style="font-size:10px" title="多份资料同名知识点已归并">×${nd.src} 源</span>`:"";
-    if(!nd.kids.length)
+    if(!nd.kids.length&&!vs.length)
       return `<div class="tree-node"><div class="lb" onclick="Tree.detail('${nd.id.replace(/"/g,"")}')"><span style="color:var(--tx2)">·</span><span class="grow">${esc(title)}</span>${srcTag}${bar}</div></div>`;
     return `<details class="tree-node" ${depth<1||kw?"open":""}><summary style="cursor:pointer;list-style:none">
         <span class="grow" onclick="event.preventDefault();Tree.detail('${nd.id.replace(/"/g,"")}')">${esc(title)}</span>${srcTag}${bar}</summary>
@@ -1697,7 +1734,26 @@ const Tree={
         <span class="muted" style="font-size:11px;align-self:center" id="tree-card-n"></span></div></div>`;
     renderMath(box); box.scrollIntoView({behavior:"smooth"});
   },
-  /* ---- P7: 思维导图(SVG 树状图, 按当前科目; 层级截到 3 层, 更深并入叶子) ---- */
+  /* 虚拟节点标题展示: LaTeX→unicode 平文本 + 超 28 字截断 (完整标题与正文在详情视图) */
+  _vTitle(t){
+    let s=String(t||""); if(window.texPlain) s=texPlain(s);
+    return s.length>28?s.slice(0,27)+"…":s;
+  },
+  /* P16: (N) 虚拟节点详情 —— 内容取自所属知识点正文的对应段落 (① 子点等细节随正文完整展示) */
+  vDetail(pid,n){
+    const kp=IDX.kp[pid]; if(!kp) return;
+    const seg=(this._vSegs(kp)||[]).find(s=>s.n===n); if(!seg) return;
+    const box=$("#tree-detail");
+    const path=this.pathOf(pid);
+    const crumb=path.length?`<div class="muted" style="font-size:12px;margin-bottom:2px">${path.map(t=>esc(t)).join(" › ")}</div>`:"";
+    const content=seg.body||"";
+    box.innerHTML=`<div class="card"><h2 style="font-size:15px">(${seg.n}) ${esc(this._vTitle(seg.title))}</h2>${crumb}
+      <div class="muted" style="font-size:11px;margin-bottom:6px">所属章节: ${esc(chapPath(kp.chapterId))} · 源自知识点「${esc(kp.title||pid)}」</div>
+      <div class="kp-content" style="line-height:1.85;margin:10px 0">${kpContentHTML({content})}</div>
+      <div class="row" style="margin-top:10px"><button class="btn sm" onclick="Tree.review('${pid.replace(/"/g,"")}')">生成今日复习卡</button>
+        <button class="btn sm ghost" onclick="Cards.aiBoost('kc:${pid.replace(/"/g,"")}')" title="用 AI 优化该知识点主卡">✨ AI 优化主卡</button></div></div>`;
+    renderMath(box); box.scrollIntoView({behavior:"smooth"});
+  },
   mindToggle(){ this._mind=!this._mind;
     const b=$("#tree-mind-btn"); if(b) b.textContent=this._mind?"📋 返回列表":"🌳 思维导图";
     this._mind?this.mind():this.draw(); },
