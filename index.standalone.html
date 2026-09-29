@@ -2273,15 +2273,19 @@ async function aiChat(prompt,opts){
       if(j2&&typeof j2.content==="string") content=j2.content;
       else if(j2&&j2.choices&&j2.choices[0]&&j2.choices[0].message) content=String(j2.choices[0].message.content||"");
       if(!content){
-        /* 推理模型兜底: 部分网关把正文放进 reasoning_content 而留空 content */
         const m0=(j2&&j2.choices&&j2.choices[0]&&j2.choices[0].message)||{};
-        const rs=typeof m0.reasoning_content==="string"?m0.reasoning_content.trim():"";
-        if(rs){ content=rs; }
-        else{
-          /* 把上游原始响应带出来, 一眼定位: 模型名错/无权限(错误装进200) / 非JSON体 */
+        const rc=typeof m0.reasoning_content==="string"?m0.reasoning_content.trim():"";
+        const rz=typeof m0.reasoning==="string"?m0.reasoning.trim():"";
+        if(rc||rz){
+          /* content 为空但推理字段有内容 → 推理模型把输出额度耗尽在思考上, 并非真"空内容"。
+             这是 max_tokens 太小导致的: 模型把额度全花在 reasoning, 没余量生成正文。
+             抛特定可识别错误, 让排程自动加大 max_tokens 重试。 */
           const snip=j2?JSON.stringify(j2).slice(0,240):"响应体不是有效 JSON";
-          throw new Error("中转返回空内容, 上游原始响应: "+snip+"。常见原因: ① 模型名不存在或 Key 无该模型权限(网关把错误包在 HTTP 200 里); ② 上游接口路径不对(检查 Base URL 是否为 OpenAI 兼容 /v1); ③ 推理模型把 max_tokens 花在思考上");
+          throw new Error("推理模型把输出额度耗尽在思考上(content 为空, 但 reasoning 有 "+(rc.length+rz.length)+" 字思考内容)。请调大「中转 max_tokens」或改用非推理模型; 排程会自动加大额度重试。原始响应: "+snip);
         }
+        /* 真·空内容: 模型名错/无权限(错误包在 HTTP 200) / Base URL 非 OpenAI 兼容 / 上游接口路径不对 */
+        const snip=j2?JSON.stringify(j2).slice(0,240):"响应体不是有效 JSON";
+        throw new Error("中转返回空内容, 上游原始响应: "+snip+"。常见原因: ① 模型名不存在或 Key 无该模型权限(网关把错误包进 HTTP 200); ② 上游接口路径不对(检查 Base URL 是否为 OpenAI 兼容 /v1)");
       }
       return {choices:[{message:{content}}]};   // 统一形状, 复用 aiTxt
     }
@@ -3031,17 +3035,22 @@ ${menu}
   try{
     /* 分更多批生成(每批 2 周), 单请求体积更小 → 规避中转 546 资源限制 & 提升本地模型稳定性 */
     const B=2, parts=[], totalB=Math.ceil(12/B);
-    const schedBatch=async(a,b,att)=>{
+    const schedBatch=async(a,b,att,mt)=>{
       try{
         const txt=aiTxt(await aiChat(schedPrompt(a,b),
-          {temperature:0.2,timeout:600000,max_tokens:att>0?1000:2000}))
+          {temperature:0.2,timeout:600000,max_tokens:mt}))
           .replace(/^```(json)?\s*/i,"").replace(/```\s*$/,"").trim();
         const m=txt.match(/\{[\s\S]*\}/); if(!m) throw new Error("未解析到 JSON(第 "+a+"~"+b+" 周批次)");
         return JSON.parse(m[0]);
       }catch(e){
-        if(att<1 && /546/.test(String(e.message))){
+        const msg=String(e&&e.message||e);
+        if(att<1 && /推理模型把输出额度耗尽/.test(msg)){
+          if(out) out.innerHTML='<div class="muted">⚠️ 第 '+a+'~'+b+' 周批次: 推理模型额度耗尽, 正在加大 max_tokens 重试…</div>';
+          return schedBatch(a,b,att+1,9000);
+        }
+        if(att<1 && /546/.test(msg)){
           if(out) out.innerHTML='<div class="muted">⚠️ 第 '+a+'~'+b+' 周批次触发中转算力上限(546), 正在用更小输出重试…</div>';
-          return schedBatch(a,b,att+1);
+          return schedBatch(a,b,att+1,1000);
         }
         throw e;
       }
@@ -3049,7 +3058,7 @@ ${menu}
     for(let s=1;s<=12;s+=B){
       const e=Math.min(12,s+B-1);
       if(out) out.innerHTML='<div class="muted">🤖 AI 正在生成第 '+s+'~'+e+' 周计划 ('+parts.length+'/'+totalB+' 批已完成)…</div>';
-      parts.push(await schedBatch(s,e,0));
+      parts.push(await schedBatch(s,e,0,6000));
     }
     const order=parts[0].order||[];
     const months=parts[0].months||[];
@@ -3613,7 +3622,7 @@ const Settings={
     if(!cfg.url||!cfg.key){ toast("请先填写接口地址与密钥"); return; }
     toast("测试连接中…");
     try{
-      /* 不传 max_tokens: 推理模型(如商汤 deepseek-v4-flash)会先把配额花在思考内容上, 限 8 必然空正文 */
+      /* 不传 max_tokens → 由中转默认(4096)决定, 给推理模型留出「思考+正文」额度, 避免被思考耗尽导致空正文 */
       const j=await aiChat("连接测试,只回复两个字母: ok",{temperature:0,timeout:60000});
       const t=aiTxt(j);
       toast("✅ 连接成功"+(t?(" · 模型回复: "+t.slice(0,40)):""));
