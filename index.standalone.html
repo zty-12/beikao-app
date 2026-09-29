@@ -2254,7 +2254,7 @@ async function aiChat(prompt,opts){
           body:JSON.stringify({baseUrl:u,apiKey:cfg.key,model:cfg.model||"deepseek-chat",
             messages:[{role:"user",content:prompt}],
             temperature:opts.temperature==null?0.3:opts.temperature,
-            maxTokens:opts.max_tokens||undefined})});
+            maxTokens:opts.max_tokens!=null?opts.max_tokens:4096})});
       }catch(ne){
         const msg=String((ne&&ne.message)||ne);
         if(/abort/i.test(msg)) throw new Error("请求超时(超过 "+Math.round(tmo/1000)+" 秒), 可重试或调大超时");
@@ -2265,6 +2265,7 @@ async function aiChat(prompt,opts){
         try{ const j=JSON.parse(tx); if(j&&typeof j.error==="string") d=j.error; }catch(e){}
         if(/UNAUTHORIZED_LEGACY_JWT/i.test(tx||d)) throw new Error("中转网关 JWT 校验未通过(UNAUTHORIZED_LEGACY_JWT): 中转函数属于另一个 Supabase 项目, 而前端只带了本同步项目的 anon key。解决: ① 在「中转项目 anon key」里填中转函数所属项目的 anon key (Supabase 控制台 → Settings → API → anon public); 或 ② 把 llm-proxy 部署到本同步项目 (URL 会自动派生, anon key 自动匹配)。");
         if(r.status===401) throw new Error("中转鉴权失败(401): 中转 Token 与 Supabase Secrets 里的 LLM_PROXY_TOKEN 不一致, 或函数仍是旧版未读取 x-proxy-token 头。(原始响应: "+d+")");
+        if(r.status===546) throw new Error("中转算力超限(HTTP 546): 单请求/响应过大或上游过慢, 触发 Supabase Edge Function 资源上限(CPU/内存)。排程已自动拆成更多小批并限制输出长度; 若仍失败, 建议把 llm-proxy 部署为「纯透传」版(响应体流式直发、不在函数内解析 JSON), 详见设置页说明。");
         throw new Error("中转错误 HTTP "+r.status+": "+d);
       }
       const j2=await r.json().catch(()=>null);
@@ -3003,7 +3004,7 @@ async aiSched(){
     const ks=(BANK.knowledgePoints||[]).filter(k=>(k.content||"").trim()&&!/^\d+(\.\d+)*$/.test(String(k.title||"").trim())
       &&(x.chapters||[]).some(c=>k.chapterId===c||k.chapterId.startsWith(c+"-")));
     return x.title+": "+ks.slice(0,40).map(k=>String(k.title).trim()).join(" | ");
-  }).join("\n").slice(0,14000);
+  }).join("\n").slice(0,6000);
   const schedPrompt=(a,b)=>`你是备考排程引擎。请根据以下数据, 把未来 ${monthsN} 个月的复习时间分配到各科目, 并给出逐周详细安排, 输出严格 JSON。
 【用户约束】考试: ${ST.settings.examName||""}；日期: ${ST.settings.examDate||"未设置"}；工作日 ${+ST.settings.weekdayMin||90}分钟/天, 周末 ${+ST.settings.weekendMin||240}分钟/天 × 周末强度系数${wkF}；番茄钟 ${pomoM}分钟/个；目标分 ${ST.settings.targetScore||132}。
 【时间预算(必须作为约束)】听课占比: 基础期 ${lrB.base}%、强化期 ${lrB.mid}%、冲刺期 ${lrB.sprint}% 的时长先用于看视频课(跟课), 其余时间刷题/背诵 —— 各科"课程剩余估时"要优先用听课时间消化, 课程没排完的科目应获得足够月份。每月可用时长见下方, 分配的时间占比之和不能超过该月可用时长。
@@ -3028,14 +3029,27 @@ ${menu}
 {"mode":"${mode}","order":["科目id",...],"months":[{"ym":"${yms[0]||"2026-10"}","focus":[{"id":"科目id","pct":60},...]},...],"weeks":[{"n":1,"wd":{"id":"科目id","ch":["知识点关键词","..."]},"we":{"id":"科目id","ch":["..."]},"review":"复习第1周内容(D+7)","goal":"完成xx知识点"},...],"strategy":{"reviewNodes":[1,2,4,7,15,30]},"notes":"..."}`;
   const out=$("#ai-plan-out");
   try{
-    /* 分 3 批生成(每批 4 周), 降低单请求体积 → 规避中转 546 资源限制 & 提升本地模型稳定性 */
-    const B=4, parts=[];
+    /* 分更多批生成(每批 2 周), 单请求体积更小 → 规避中转 546 资源限制 & 提升本地模型稳定性 */
+    const B=2, parts=[], totalB=Math.ceil(12/B);
+    const schedBatch=async(a,b,att)=>{
+      try{
+        const txt=aiTxt(await aiChat(schedPrompt(a,b),
+          {temperature:0.2,timeout:600000,max_tokens:att>0?1000:2000}))
+          .replace(/^```(json)?\s*/i,"").replace(/```\s*$/,"").trim();
+        const m=txt.match(/\{[\s\S]*\}/); if(!m) throw new Error("未解析到 JSON(第 "+a+"~"+b+" 周批次)");
+        return JSON.parse(m[0]);
+      }catch(e){
+        if(att<1 && /546/.test(String(e.message))){
+          if(out) out.innerHTML='<div class="muted">⚠️ 第 '+a+'~'+b+' 周批次触发中转算力上限(546), 正在用更小输出重试…</div>';
+          return schedBatch(a,b,att+1);
+        }
+        throw e;
+      }
+    };
     for(let s=1;s<=12;s+=B){
       const e=Math.min(12,s+B-1);
-      if(out) out.innerHTML='<div class="muted">🤖 AI 正在生成第 '+s+'~'+e+' 周计划 ('+parts.length+'/3 批已完成)…</div>';
-      const txt=aiTxt(await aiChat(schedPrompt(s,e),{temperature:0.2,timeout:600000})).replace(/^```(json)?\s*/i,"").replace(/```\s*$/,"").trim();
-      const m=txt.match(/\{[\s\S]*\}/); if(!m) throw new Error("未解析到 JSON(第 "+s+"~"+e+" 周批次)");
-      parts.push(JSON.parse(m[0]));
+      if(out) out.innerHTML='<div class="muted">🤖 AI 正在生成第 '+s+'~'+e+' 周计划 ('+parts.length+'/'+totalB+' 批已完成)…</div>';
+      parts.push(await schedBatch(s,e,0));
     }
     const order=parts[0].order||[];
     const months=parts[0].months||[];
